@@ -1,0 +1,18 @@
+<svg width="560" height="140" viewBox="0 0 560 140" xmlns="http://www.w3.org/2000/svg">
+  <!-- mark -->
+  <g transform="translate(10,10) scale(0.5)">
+    <g stroke="#4338CA" stroke-width="14" stroke-linecap="round" fill="none">
+      <path d="M20 70 V32 A12 12 0 0 1 32 20 H70" />
+      <path d="M170 20 H208 A12 12 0 0 1 220 32 V70" />
+      <path d="M220 170 V208 A12 12 0 0 1 208 220 H170" />
+      <path d="M70 220 H32 A12 12 0 0 1 20 208 V170" />
+    </g>
+    <path
+      d="M120 66 L134.5 104.8 L176 108.2 L144.2 134.6 L154.2 175 L120 152.4 L85.8 175 L95.8 134.6 L64 108.2 L105.5 104.8 Z"
+      fill="#E8B23D"
+    />
+  </g>
+  <!-- wordmark -->
+  <text x="140" y="70" font-family="Georgia, 'Iowan Old Style', serif" font-size="44" fill="#12131A">Nexus<tspan fill="#4338CA" font-weight="bold">Revu</tspan></text>
+  <text x="142" y="96" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="15" letter-spacing="1.5" fill="#12131A" fill-opacity="0.5">BY AM TECHNEXUS LABS</text>
+</svg>
