@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { businesses } from "@/db/schema";
 import { getSessionAdminId } from "@/lib/auth";
-import { generateQrDataUrl } from "@/lib/qr";
 import { nanoid } from "nanoid";
 import { eq, and } from "drizzle-orm";
 
@@ -17,6 +16,7 @@ async function ensureManageToken(business: typeof businesses.$inferSelect) {
   return updated;
 }
 
+/** Returns QR target URLs only — images are generated client-side for speed. */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const adminId = await getSessionAdminId();
   if (!adminId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -34,18 +34,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const reviewUrl = `${origin}/r/${business.slug}`;
   const manageUrl = `${origin}/q/${business.manageToken}`;
-
-  const [reviewQrDataUrl, manageQrDataUrl] = await Promise.all([
-    generateQrDataUrl(reviewUrl),
-    generateQrDataUrl(manageUrl),
-  ]);
+  const payUrl = `${origin}/pay/${business.manageToken}`;
 
   return NextResponse.json({
-    reviewQrDataUrl,
     reviewUrl,
-    manageQrDataUrl,
     manageUrl,
-    // keep old keys so nothing else breaks mid-refactor
-    qrDataUrl: reviewQrDataUrl,
+    payUrl,
   });
 }

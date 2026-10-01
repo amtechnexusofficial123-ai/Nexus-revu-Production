@@ -8,6 +8,11 @@ const CTA_BLUE = "#1A73E8";
 const BG = "#FFFFFF";
 const GOOGLE_REVIEWS_LOGO_PATH = "/google-reviews-logo.png";
 
+/** Pixel density for print-ready PNG downloads (~3× layout size). */
+const EXPORT_SCALE = 3;
+/** Lighter density for on-screen flyer previews. */
+const PREVIEW_SCALE = 1.25;
+
 export type QrFlyerOptions = {
   businessName: string;
   logoUrl?: string | null;
@@ -141,6 +146,36 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
+/** Draw QR modules without bilinear blur so edges stay crisp at print size. */
+function drawQrCrisp(
+  ctx: CanvasRenderingContext2D,
+  qr: HTMLImageElement,
+  x: number,
+  y: number,
+  size: number
+) {
+  const prev = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(qr, x, y, size, size);
+  ctx.imageSmoothingEnabled = prev;
+}
+
+function prepareExportCanvas(
+  layoutWidth: number,
+  layoutHeight: number,
+  scale: number = EXPORT_SCALE
+): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(layoutWidth * scale);
+  canvas.height = Math.round(layoutHeight * scale);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not create image");
+  ctx.scale(scale, scale);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  return { canvas, ctx };
+}
+
 function normalizeFlyerOptions(options?: QrFlyerOptions | string | null): QrFlyerOptions {
   if (typeof options === "string" || options === null || options === undefined) {
     return { businessName: "Our business", logoUrl: typeof options === "string" ? options : null };
@@ -151,11 +186,13 @@ function normalizeFlyerOptions(options?: QrFlyerOptions | string | null): QrFlye
 /** Renders the full review QR flyer to a canvas (shared by preview and download). */
 export async function renderQrFlyerCanvas(
   qrDataUrl: string,
-  options?: QrFlyerOptions | string | null
+  options?: QrFlyerOptions | string | null,
+  renderOptions?: { scale?: number }
 ): Promise<HTMLCanvasElement> {
   const opts = normalizeFlyerOptions(options);
   const businessName = opts.businessName?.trim() || "Our business";
   const qr = await loadImage(qrDataUrl);
+  const scale = renderOptions?.scale ?? EXPORT_SCALE;
 
   let logo: HTMLImageElement | null = null;
   const trimmedLogo = opts.logoUrl?.trim();
@@ -208,12 +245,12 @@ export async function renderQrFlyerCanvas(
         )
       : { width: 0, height: 0 };
 
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Could not create image");
-
-  ctx.font = `600 26px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
-  const nameLines = wrapText(ctx, businessName, INNER_W - 8);
+  // Measure name lines on a throwaway 1× context so wrap matches final layout.
+  const measureCanvas = document.createElement("canvas");
+  const measureCtx = measureCanvas.getContext("2d");
+  if (!measureCtx) throw new Error("Could not create image");
+  measureCtx.font = `600 26px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+  const nameLines = wrapText(measureCtx, businessName, INNER_W - 8);
   const nameBlockH = nameLines.length * 32;
 
   let contentH = PAD;
@@ -222,13 +259,13 @@ export async function renderQrFlyerCanvas(
   if (googleReviewsLogo) contentH += googleReviewsDims.height + 24;
   contentH += QR_SIZE + QR_BORDER * 2 + 20 + CTA_TEXT_H + 16 + FOOTER_H + PAD;
 
-  canvas.width = CARD_W;
-  canvas.height = contentH + OUTER_BORDER * 2;
+  const layoutH = contentH + OUTER_BORDER * 2;
+  const { canvas, ctx } = prepareExportCanvas(CARD_W, layoutH, scale);
 
   const innerX = OUTER_BORDER;
   const innerY = OUTER_BORDER;
   const innerW = CARD_W - OUTER_BORDER * 2;
-  const innerH = canvas.height - OUTER_BORDER * 2;
+  const innerH = layoutH - OUTER_BORDER * 2;
 
   ctx.fillStyle = BG;
   roundRectPath(ctx, innerX, innerY, innerW, innerH, BORDER_R);
@@ -282,7 +319,7 @@ export async function renderQrFlyerCanvas(
   ctx.fill();
   drawGoogleRoundedBorder(ctx, qrFrameX, qrFrameY, qrFrameW, qrFrameH, QR_FRAME_R, QR_BORDER);
 
-  ctx.drawImage(qr, qrFrameX + QR_BORDER, qrFrameY + QR_BORDER, QR_SIZE, QR_SIZE);
+  drawQrCrisp(ctx, qr, qrFrameX + QR_BORDER, qrFrameY + QR_BORDER, QR_SIZE);
   y += qrFrameH + 20;
 
   ctx.fillStyle = MUTED;
@@ -312,12 +349,15 @@ export async function renderQrFlyerCanvas(
   return canvas;
 }
 
-/** Data URL for in-app flyer preview (matches downloaded PNG). */
+/** Data URL for in-app flyer preview (lighter than download). */
 export async function generateQrFlyerDataUrl(
   qrDataUrl: string,
-  options?: QrFlyerOptions | string | null
+  options?: QrFlyerOptions | string | null,
+  renderOptions?: { scale?: number }
 ): Promise<string> {
-  const canvas = await renderQrFlyerCanvas(qrDataUrl, options);
+  const canvas = await renderQrFlyerCanvas(qrDataUrl, options, {
+    scale: renderOptions?.scale ?? PREVIEW_SCALE,
+  });
   return canvas.toDataURL("image/png");
 }
 
@@ -327,7 +367,7 @@ export async function downloadQrImage(
   filename: string,
   options?: QrFlyerOptions | string | null
 ) {
-  const canvas = await renderQrFlyerCanvas(qrDataUrl, options);
+  const canvas = await renderQrFlyerCanvas(qrDataUrl, options, { scale: EXPORT_SCALE });
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   if (!blob) throw new Error("Could not create image");
 
@@ -360,10 +400,12 @@ function drawLogoPlaceholder(
 /** Renders the staff questions QR card: logo, scan line, framed QR. */
 export async function renderQuestionsQrCanvas(
   qrDataUrl: string,
-  options?: QuestionsQrOptions
+  options?: QuestionsQrOptions,
+  renderOptions?: { scale?: number }
 ): Promise<HTMLCanvasElement> {
   const businessName = options?.businessName?.trim() || "Business";
   const qr = await loadImage(qrDataUrl);
+  const scale = renderOptions?.scale ?? EXPORT_SCALE;
 
   let logo: HTMLImageElement | null = null;
   const trimmedLogo = options?.logoUrl?.trim();
@@ -392,22 +434,18 @@ export async function renderQuestionsQrCanvas(
       ? fitLogoDimensions(logo.naturalWidth, logo.naturalHeight, logoMaxW, logoMaxH)
       : { width: 0, height: 0 };
 
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Could not create image");
-
   let contentH = PAD;
   if (logo) contentH += logoDims.height + 20;
   else contentH += PLACEHOLDER_SIZE + 20;
   contentH += 20 + 28 + QR_SIZE + QR_BORDER * 2 + PAD;
 
-  canvas.width = CARD_W;
-  canvas.height = contentH + OUTER_BORDER * 2;
+  const layoutH = contentH + OUTER_BORDER * 2;
+  const { canvas, ctx } = prepareExportCanvas(CARD_W, layoutH, scale);
 
   const innerX = OUTER_BORDER;
   const innerY = OUTER_BORDER;
   const innerW = CARD_W - OUTER_BORDER * 2;
-  const innerH = canvas.height - OUTER_BORDER * 2;
+  const innerH = layoutH - OUTER_BORDER * 2;
   const centerX = CARD_W / 2;
 
   ctx.fillStyle = BG;
@@ -440,16 +478,19 @@ export async function renderQuestionsQrCanvas(
   roundRectPath(ctx, qrFrameX, qrFrameY, qrFrameW, qrFrameW, QR_FRAME_R);
   ctx.fill();
   drawGoogleRoundedBorder(ctx, qrFrameX, qrFrameY, qrFrameW, qrFrameW, QR_FRAME_R, QR_BORDER);
-  ctx.drawImage(qr, qrFrameX + QR_BORDER, qrFrameY + QR_BORDER, QR_SIZE, QR_SIZE);
+  drawQrCrisp(ctx, qr, qrFrameX + QR_BORDER, qrFrameY + QR_BORDER, QR_SIZE);
 
   return canvas;
 }
 
 export async function generateQuestionsQrDataUrl(
   qrDataUrl: string,
-  options?: QuestionsQrOptions
+  options?: QuestionsQrOptions,
+  renderOptions?: { scale?: number }
 ): Promise<string> {
-  const canvas = await renderQuestionsQrCanvas(qrDataUrl, options);
+  const canvas = await renderQuestionsQrCanvas(qrDataUrl, options, {
+    scale: renderOptions?.scale ?? PREVIEW_SCALE,
+  });
   return canvas.toDataURL("image/png");
 }
 
@@ -458,7 +499,7 @@ export async function downloadQuestionsQrImage(
   filename: string,
   options?: QuestionsQrOptions
 ) {
-  const canvas = await renderQuestionsQrCanvas(qrDataUrl, options);
+  const canvas = await renderQuestionsQrCanvas(qrDataUrl, options, { scale: EXPORT_SCALE });
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   if (!blob) throw new Error("Could not create image");
 

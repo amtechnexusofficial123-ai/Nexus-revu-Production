@@ -35,7 +35,7 @@ export function draftReview(
       middle = `A solid ${category.toLowerCase()} spot`;
     }
     return {
-      draftText: `Had a great time at ${businessName}. ${middle}. Would definitely come back.`,
+      draftText: `Had a good time at ${businessName}. ${middle}`,
       sentiment: "positive",
     };
   }
@@ -63,7 +63,7 @@ function formatQaSentence(qa: QA): string {
   return `Regarding ${q.toLowerCase()}: ${answer}.`;
 }
 
-function estimateSentiment(qas: QA[]): DraftResult["sentiment"] {
+export function estimateSentiment(qas: QA[]): DraftResult["sentiment"] {
   const ratings = qas
     .map((qa) => {
       const m = qa.answer.match(/^(\d)\s+out of 5 stars$/i);
@@ -71,11 +71,23 @@ function estimateSentiment(qas: QA[]): DraftResult["sentiment"] {
     })
     .filter((n): n is number => n !== null);
 
-  if (ratings.length === 0) return "neutral";
+  if (ratings.length > 0) {
+    const avg = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+    if (avg >= 4) return "positive";
+    if (avg <= 2) return "negative";
+    return "neutral";
+  }
 
-  const avg = ratings.reduce((a, b) => a + b, 0) / ratings.length;
-  if (avg >= 4) return "positive";
-  if (avg <= 2) return "negative";
+  const text = qas.map((qa) => qa.answer.toLowerCase()).join(" ");
+  const negativeHints =
+    /\b(bad|poor|slow|cold|rude|dirty|worst|awful|terrible|disappointed|never again|not good|overpriced)\b/;
+  const positiveHints =
+    /\b(great|good|amazing|loved|excellent|tasty|friendly|perfect|recommend|delicious)\b/;
+
+  const neg = negativeHints.test(text);
+  const pos = positiveHints.test(text);
+  if (neg && !pos) return "negative";
+  if (pos && !neg) return "positive";
   return "neutral";
 }
 
@@ -85,9 +97,26 @@ export function pickQuestionCount(poolSize: number): number {
   return 3;
 }
 
-/** Picks random questions out of the business's active question pool. */
-export function pickRandomQuestions<T>(pool: T[], count?: number): T[] {
+type AlwaysAskable = { alwaysAsk?: boolean | null };
+
+/**
+ * Picks questions from the active pool. Any alwaysAsk question is included first,
+ * then the rest are filled randomly up to the target count.
+ */
+export function pickRandomQuestions<T extends AlwaysAskable>(
+  pool: T[],
+  count?: number
+): T[] {
   const n = count ?? pickQuestionCount(pool.length);
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(n, shuffled.length));
+  if (pool.length === 0 || n <= 0) return [];
+
+  const mandatory = pool.filter((q) => q.alwaysAsk);
+  const optional = pool.filter((q) => !q.alwaysAsk);
+  const shuffledOptional = [...optional].sort(() => Math.random() - 0.5);
+
+  const remaining = Math.max(0, n - mandatory.length);
+  const picked = [...mandatory, ...shuffledOptional.slice(0, remaining)];
+
+  // Light shuffle so the mandatory question isn't always first in the UI.
+  return picked.sort(() => Math.random() - 0.5);
 }

@@ -10,9 +10,9 @@
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "db:patch": "node scripts/db-patch.mjs",
-    "cf:build": "opennextjs-cloudflare build",
-    "cf:deploy": "opennextjs-cloudflare build && OPEN_NEXT_DEPLOY=true CI=true wrangler deploy",
-    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview"
+    "cf:build": "opennextjs-cloudflare build && node scripts/fix-cf-chunk-paths.mjs",
+    "cf:deploy": "npm run cf:build && OPEN_NEXT_DEPLOY=true CI=true wrangler deploy",
+    "cf:preview": "npm run cf:build && opennextjs-cloudflare preview"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",

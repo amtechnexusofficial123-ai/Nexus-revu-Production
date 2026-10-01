@@ -1,4 +1,6 @@
 import { humanizeReview } from "@/lib/reviewHumanize";
+import { recordGeminiUsage, type GeminiUsageContext } from "@/lib/geminiUsage";
+import type { GeminiUsageMetadata } from "@/lib/geminiPricing";
 import {
   draftTooSimilar,
   recentOpenings,
@@ -9,6 +11,10 @@ import {
   pickVariationRetry,
   pickNoAnswerVariation,
   pickNoAnswerVariationRetry,
+  answersAllowReturnMention,
+  formatVoiceHardRules,
+  formatLengthHardRule,
+  LENGTH_BANDS,
   type QA,
   type VariationBundle,
 } from "@/lib/reviewVariation";
@@ -19,7 +25,9 @@ export type GeminiDraftResult = {
 };
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
-const GEMINI_TIMEOUT_MS = 22000;
+const FALLBACK_MODEL = "gemini-3.5-flash-lite";
+/** Per-model wall clock — keep short so live drafts can fall back before CF 503s. */
+const GEMINI_TIMEOUT_MS = 8000;
 /** Enough for anti-repetition without bloating the prompt. */
 const MAX_RECENT_IN_PROMPT = 5;
 const PATTERN_TRUNCATE = 200;
@@ -27,7 +35,7 @@ const PATTERN_TRUNCATE = 200;
 function outputTokenLimit(model: string, requested?: number): number {
   if (requested) return requested;
   // Thinking models spend part of the budget on internal reasoning tokens.
-  return isGemini3Model(model) ? 2048 : 512;
+  return isGemini36Model(model) ? 2048 : 512;
 }
 
 function fetchWithTimeout(
@@ -52,34 +60,14 @@ function getModel(): string {
   return process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
 }
 
-function isGemini3Model(model: string): boolean {
-  return /gemini-3/i.test(model);
+function isGemini36Model(model: string): boolean {
+  return /gemini-3\.6/i.test(model);
 }
 
-type GenerateOptions = {
-  model?: string;
-  json?: boolean;
-  maxOutputTokens?: number;
-  temperature?: number;
-};
-
-/**
- * Low-level Gemini generateContent call with kiosk-review settings.
- */
-export async function generateGeminiText(
-  prompt: string,
+function buildGenerationConfig(
+  model: string,
   options?: GenerateOptions
-): Promise<string> {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is not set");
-  }
-
-  const model = options?.model ?? getModel();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    model
-  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
+): Record<string, unknown> {
   const generationConfig: Record<string, unknown> = {
     temperature: options?.temperature ?? 1,
     maxOutputTokens: outputTokenLimit(model, options?.maxOutputTokens),
@@ -87,38 +75,139 @@ export async function generateGeminiText(
   if (options?.json) {
     generationConfig.responseMimeType = "application/json";
   }
-  if (isGemini3Model(model)) {
+  // Only 3.6 Flash uses thinkingLevel. Lite models reject thinkingBudget: 0.
+  if (isGemini36Model(model)) {
     generationConfig.thinkingConfig = { thinkingLevel: "low" };
-  } else {
-    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
+  return generationConfig;
+}
+
+type GenerateOptions = {
+  model?: string;
+  json?: boolean;
+  maxOutputTokens?: number;
+  temperature?: number;
+  /** When set, the call's tokens/cost are written to gemini_usage. */
+  usage?: GeminiUsageContext;
+};
+
+async function generateGeminiTextForModel(
+  prompt: string,
+  model: string,
+  options?: GenerateOptions
+): Promise<string> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY environment variable is not set");
   }
 
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig,
-    }),
-  });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(
-      `Gemini API error: ${res.status}${errBody ? ` — ${errBody.slice(0, 200)}` : ""}`
-    );
+  const generationConfig = buildGenerationConfig(model, options);
+  const thinkingLevel =
+    (generationConfig.thinkingConfig as { thinkingLevel?: string } | undefined)?.thinkingLevel ??
+    null;
+
+  const startedAt = Date.now();
+  let usage: GeminiUsageMetadata | undefined;
+  let finishReason: string | undefined;
+  let ok = false;
+  let errorMessage: string | undefined;
+
+  try {
+    const res = await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig,
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(
+        `Gemini API error (${model}): ${res.status}${errBody ? ` — ${errBody.slice(0, 200)}` : ""}`
+      );
+    }
+
+    // Read as text first so truncated/corrupt bodies become a clear throw
+    // (fallback models / backlog can recover) instead of a vague JSON parse error.
+    const raw = await res.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        `Gemini returned invalid JSON (${model}, ${raw.length} bytes)`
+      );
+    }
+    const data = parsed as {
+      candidates?: Array<{
+        content?: { parts?: { text?: string; thought?: boolean }[] };
+        finishReason?: string;
+      }>;
+      usageMetadata?: GeminiUsageMetadata;
+    };
+    usage = data.usageMetadata;
+    finishReason = data.candidates?.[0]?.finishReason;
+    const text = extractAnswerText(data);
+
+    if (!text) {
+      throw new Error(
+        `Gemini returned an empty response (${model})${finishReason ? ` (finishReason: ${finishReason})` : ""}`
+      );
+    }
+    ok = true;
+    return text;
+  } catch (err) {
+    errorMessage = err instanceof Error ? err.message : String(err);
+    throw err;
+  } finally {
+    if (options?.usage) {
+      recordGeminiUsage({
+        ...options.usage,
+        model,
+        thinkingLevel,
+        usage,
+        finishReason,
+        ok,
+        error: errorMessage,
+        latencyMs: Date.now() - startedAt,
+      });
+    }
+  }
+}
+
+/**
+ * Low-level Gemini generateContent call with kiosk-review settings.
+ * Tries the primary model first, then falls back to gemini-3.5-flash-lite on error.
+ */
+export async function generateGeminiText(
+  prompt: string,
+  options?: GenerateOptions
+): Promise<string> {
+  const primaryModel = options?.model ?? getModel();
+  const models =
+    primaryModel === FALLBACK_MODEL ? [primaryModel] : [primaryModel, FALLBACK_MODEL];
+
+  let lastError: unknown;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      return await generateGeminiTextForModel(prompt, model, options);
+    } catch (err) {
+      lastError = err;
+      const nextModel = models[i + 1];
+      if (nextModel) {
+        console.warn(`Gemini model ${model} failed, trying ${nextModel}:`, err);
+      }
+    }
   }
 
-  const data = await res.json();
-  const text = extractAnswerText(data);
-
-  if (!text) {
-    const finishReason = (data.candidates?.[0] as { finishReason?: string } | undefined)?.finishReason;
-    throw new Error(
-      `Gemini returned an empty response${finishReason ? ` (finishReason: ${finishReason})` : ""}`
-    );
-  }
-  return text;
+  throw lastError;
 }
 
 type GeminiPart = { text?: string; thought?: boolean };
@@ -159,7 +248,7 @@ const SELECTIVE_CONTEXT_RULES = `
 CONTEXT USAGE (important):
 - From the background description, use at most ONE or TWO details when needed. Never list every product or service.
 - Do not read the description like a menu or feature list.
-- Vary what you highlight across reviews (a product, service, atmosphere, staff, or would come back).`;
+- Vary what you highlight (a product, service, atmosphere, or staff) — not a polite "I'll be back" closer.`;
 
 const BANNED_OPENERS = [
   "I recently visited",
@@ -202,7 +291,16 @@ const BANNED_PHRASES = [
   "you won't be disappointed",
   "gem of a place",
   "can't wait to go back",
+  "can't wait to come back",
   "will definitely be back",
+  "will definitely come back",
+  "would definitely come back",
+  "will be visiting again",
+  "will be back soon",
+  "looking forward to visiting again",
+  "looking forward to coming back",
+  "see you soon",
+  "until next time",
   "exceeded expectations",
   "perfect experience",
   "truly wonderful",
@@ -224,15 +322,41 @@ ${BANNED_PHRASES.map((p) => `- "${p}"`).join("\n")}
 Prefer one plain specific detail from the answers over praise clichés.`;
 
 const WRITE_LIKE_RULES = `
-WRITE LIKE A REAL PERSON, NOT MARKETING:
-- First person, conversational — like a quick note, not an essay
-- Use contractions ("don't", "it's", "we'd")
+WRITE LIKE A REAL PERSON TYPING A QUICK NOTE (Indian English):
+- Everyday spoken Indian English — how people actually write Google reviews in India
+- Contractions where natural ("don't", "it's", "wasn't"); plain words like "quite good", "bit costly", "properly done", "staff was helpful" are fine
+- Light local flavour ok if it fits naturally — one soft filler max ("only", "kinda", "a bit", "ya") — never stack slang, Hinglish parody, fake accent, or deliberate typos
+- Avoid Americanisms ("awesome", "y'all", "stoked", "the bomb", "super cute")
+- Imperfections are good: slightly messy wording, a fragment, trailing off, uneven punctuation
+- Occasional lowercase start or missing final period is fine — do not polish every sentence
+- Never use a neat 3-beat structure (setup + praise + closer)
+- No corporate politeness or polished customer-service tone
 - No em dashes or en dashes; no hyphenated compounds (write "well behaved" not "well-behaved")
-- No semicolons or colons; simple punctuation only
-- Vary sentence length; short fragments are fine
-- Sound understated when ratings are good — "pretty good", "glad we came" beats gushing
-- Only use facts from the answers and business context — do not invent menu items, staff names, or details
+- No semicolons or colons; simple punctuation only; avoid stacking exclamation marks
+- NEVER use a rigid formula (opening + service note + closing)
+- Do NOT invent menu items, staff names, or details not in the answers/context
 - No emojis or hashtags`;
+
+const ANSWER_GROUNDING_RULES = `
+HARD RULE — ANSWER GROUNDING:
+- Use 1 or 2 concrete details taken from the customer answers only
+- Prefer what they actually said (a product, wait, staff moment, price note) over abstract praise
+- Do NOT invent specifics that are not in the answers
+- No generic praise loops that could fit any business ("great service, great food, great vibe")`;
+
+const NO_RETURN_SIGN_OFF = `
+HARD RULE — NO RETURN / REVISIT SIGNOFFS:
+- Do NOT end with (or include) lines like "I'll be back", "will visit again", "would come back", "looking forward to coming back", "see you soon"
+- Only mention returning if the customer's own answers clearly talk about coming back / visiting again`;
+
+const CONSTRUCTIVE_TONE_RULES = `
+WHEN FEEDBACK IS MIXED OR NEGATIVE (low stars, complaints, disappointment):
+- Stay truthful to the answers — do NOT flip a bad experience into praise
+- Calm and plain, not angry or dramatic — still everyday speech, not corporate soft-speak
+- Prefer plain specifics ("wait was long", "food was cold") over insults ("terrible", "worst", "awful", "never again")
+- No profanity, all-caps ranting, or attacks on staff by name
+- Keep it short — state what went wrong without stacking complaints
+- Sentiment label must still match reality (negative stays negative when the visit went poorly)`;
 
 function formatBannedLanguageRules(): string {
   return BANNED_LANGUAGE_RULES;
@@ -270,10 +394,11 @@ Background (accuracy only, do NOT recite the full list): ${description}`;
 
 function formatVariationBlock(variation: VariationBundle, noAnswers: boolean): string {
   const lines = [
-    `- Target length: about ${variation.targetWords} words (not longer)`,
-    `- Structure: ${variation.structureSeed}`,
-    `- Voice: ${variation.voiceSeed}`,
-  ];
+    formatLengthHardRule(variation.lengthMode, variation.targetWords),
+    variation.lengthMode === "short" ? `- Shape: ${variation.structureSeed}` : "",
+    "",
+    formatVoiceHardRules(variation.voice),
+  ].filter(Boolean);
   if (!noAnswers) {
     lines.push(
       `- Lead with this answer as your opening focus: Q: ${variation.leadQa.question} / A: ${variation.leadQa.answer}`
@@ -286,6 +411,17 @@ function formatVariationBlock(variation: VariationBundle, noAnswers: boolean): s
     lines.push(`- Primary highlight: ${variation.highlightTheme}`);
   }
   return lines.join("\n");
+}
+
+function lengthHintForLite(variation: VariationBundle): string {
+  const band = LENGTH_BANDS[variation.lengthMode];
+  if (variation.lengthMode === "single") {
+    return `HARD: exactly one sentence, ${band.minWords}-${band.maxWords} words (aim ~${variation.targetWords}).`;
+  }
+  if (variation.lengthMode === "two_liner") {
+    return `HARD: exactly two short lines/sentences, ${band.minWords}-${band.maxWords} words total (aim ~${variation.targetWords}).`;
+  }
+  return `HARD: ${band.minWords}-${band.maxWords} words, uneven multi-beat (aim ~${variation.targetWords}). Not one tiny sentence.`;
 }
 
 function formatRepetitionGuards(recentDrafts: string[]): string {
@@ -306,12 +442,56 @@ function formatRepetitionGuards(recentDrafts: string[]): string {
   return `${openingBan}${patternBan}`;
 }
 
+function buildLiteNoAnswersPrompt(
+  business: BusinessContext,
+  variation: VariationBundle
+): string {
+  const v = variation.voice;
+  return `Write a short Google review for ${business.name} in spoken Indian English. Contractions, imperfect ok. Not marketing.
+${business.category ? `Business type: ${business.category}` : ""}
+${variation.highlightTheme ? `Mention: ${variation.highlightTheme}` : ""}
+
+${lengthHintForLite(variation)} First person. No "I'll be back" / visit-again closer.
+VOICE (must be obvious): ${v.label}
+Do: ${v.dos[0]}
+Don't: ${v.donts[0]}
+
+Respond ONLY with JSON: {"draftText":"...","sentiment":"positive|neutral|negative"}`;
+}
+
+function buildLiteReviewPrompt(
+  business: BusinessContext,
+  qas: QA[],
+  variation: VariationBundle
+): string {
+  const returnHint = answersAllowReturnMention(qas)
+    ? "Customer mentioned returning — you may briefly echo that."
+    : 'Do NOT say you\'ll be back / visit again.';
+  const v = variation.voice;
+  return `Write a short Google review from these customer answers in spoken Indian English. Everyday speech, contractions, imperfect ok — not an essay.
+
+Business: ${business.name}
+${business.category ? `Type: ${business.category}` : ""}
+
+Answers:
+${qas.map((qa, i) => `${i + 1}. ${qa.question} → ${qa.answer}`).join("\n")}
+
+${lengthHintForLite(variation)} Lead with: "${variation.leadQa.answer}". Use 1–2 concrete details from the answers only — no invented specifics, no generic praise loops. Match tone to star ratings. No marketing clichés.
+VOICE (must be obvious): ${v.label}
+Do: ${v.dos[0]}
+Don't: ${v.donts[0]}
+${returnHint}
+If feedback is negative or mixed: stay truthful but calm — plain specifics, no insults. Do not rewrite a bad visit as praise.
+
+Respond ONLY with JSON: {"draftText":"...","sentiment":"positive|neutral|negative"}`;
+}
+
 function buildNoAnswersPrompt(
   business: BusinessContext,
   variation: VariationBundle,
   recentDrafts: string[]
 ): string {
-  return `You are drafting a Google review for this business. The customer did not answer any questions — write a short, genuine positive review grounded in the business context below.
+  return `You are drafting a Google review for this business. The customer did not answer any questions — write a short, genuine positive note grounded in the business context below.
 
 ${formatBusinessContext(business, variation.highlightTheme)}
 
@@ -320,10 +500,14 @@ ${formatVariationBlock(variation, true)}
 ${formatRepetitionGuards(recentDrafts)}
 ${SELECTIVE_CONTEXT_RULES}
 ${formatBannedLanguageRules()}
+${NO_RETURN_SIGN_OFF}
 ${formatWriteRules([
-  "Keep it positive and believable — friendly staff, good experience, would return",
+  "Keep it positive and believable without corporate politeness",
   "Stay true to the category and description — do not mention meals, dinner, or restaurant vibes unless that fits this business",
   "Do not invent specific menu items, staff names, or details beyond the context above",
+  "Never use opening + praise + I'll-be-back formula",
+  "Spoken Indian English — not American review-speak",
+  "Obey the HARD RULE — LENGTH block exactly (word count + sentence/line shape)",
 ])}
 
 Then classify overall sentiment as exactly one word: positive, neutral, or negative.
@@ -338,6 +522,7 @@ function buildReviewPrompt(
   variation: VariationBundle,
   recentDrafts: string[]
 ): string {
+  const allowReturn = answersAllowReturnMention(qas);
   return `You are drafting a Google review for this business from a real customer's quick answers.
 
 ${formatBusinessContext(business)}
@@ -350,10 +535,22 @@ ${formatVariationBlock(variation, false)}
 ${formatRepetitionGuards(recentDrafts)}
 ${SELECTIVE_CONTEXT_RULES}
 ${formatBannedLanguageRules()}
+${allowReturn ? "" : NO_RETURN_SIGN_OFF}
+${CONSTRUCTIVE_TONE_RULES}
+${ANSWER_GROUNDING_RULES}
 ${formatWriteRules([
   "Match tone honestly to star ratings in the answers",
   "Always stay true to the business category and description above — do not mention meals, dinner, or restaurant vibes unless that fits this business",
-  "No emojis or hashtags unless the customer's vibe clearly suggests it",
+  "Spoken Indian English — not American review-speak",
+  allowReturn
+    ? "Customer answers mention returning — a brief natural echo is ok, not a corporate closer"
+    : "Do not add any return / visit-again signoff",
+  "Obey the HARD RULE — LENGTH block exactly (word count + sentence/line shape)",
+  variation.lengthMode === "single"
+    ? "Write exactly one casual sentence — no wrap-up"
+    : variation.lengthMode === "two_liner"
+      ? "Write two short uneven lines — ok if they feel a bit disconnected"
+      : "Keep shape uneven — never opening + service note + closing; stay in the word band",
 ])}
 
 Then classify overall sentiment as exactly one word: positive, neutral, or negative.
@@ -381,42 +578,178 @@ async function generateOnce(
   business: BusinessContext,
   qas: QA[],
   variation: VariationBundle,
-  recentDrafts: string[]
+  recentDrafts: string[],
+  usage: GeminiUsageContext
 ): Promise<GeminiDraftResult> {
   const hasAnswers = qas.some((qa) => qa.answer.trim());
-  const prompt = hasAnswers
+  const fullPrompt = hasAnswers
     ? buildReviewPrompt(business, qas, variation, recentDrafts)
     : buildNoAnswersPrompt(business, variation, recentDrafts);
-  const text = await generateGeminiText(prompt, {
-    json: true,
-    temperature: 1,
-  });
-  return parseDraftJson(text);
+  const litePrompt = hasAnswers
+    ? buildLiteReviewPrompt(business, qas, variation)
+    : buildLiteNoAnswersPrompt(business, variation);
+
+  const primaryModel = getModel();
+  const attempts: { model: string; prompt: string }[] = [
+    { model: primaryModel, prompt: fullPrompt },
+  ];
+  if (primaryModel !== FALLBACK_MODEL) {
+    attempts.push({ model: FALLBACK_MODEL, prompt: litePrompt });
+  }
+
+  let lastError: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, prompt } = attempts[i];
+    try {
+      const text = await generateGeminiTextForModel(prompt, model, {
+        json: true,
+        temperature: 1,
+        usage,
+      });
+      return parseDraftJson(text);
+    } catch (err) {
+      lastError = err;
+      const next = attempts[i + 1];
+      if (next) {
+        console.warn(`Gemini model ${model} failed, trying ${next.model}:`, err);
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 /**
- * Gemini kiosk-style review draft with random variation and anti-repetition retry.
+ * Gemini kiosk-style review draft with random variation and optional anti-repetition retry.
+ * Length is enforced only via the first prompt (no length re-rolls — keeps latency down).
  */
 export async function draftReviewWithGemini(
   business: BusinessContext,
   qas: QA[],
-  recentDrafts: string[] = []
+  recentDrafts: string[] = [],
+  options?: {
+    antiRepeatRetry?: boolean;
+    businessId?: string | null;
+    sessionId?: string | null;
+  }
 ): Promise<GeminiDraftResult> {
   const hasAnswers = qas.some((qa) => qa.answer.trim());
   const themes = (business.reviewThemes ?? []).filter((t) => t.trim());
+  const usage: GeminiUsageContext = {
+    purpose: "live_draft",
+    businessId: options?.businessId,
+    sessionId: options?.sessionId,
+    requestId: crypto.randomUUID(),
+  };
 
   const variation = hasAnswers
     ? pickVariation(qas)
     : pickNoAnswerVariation(themes);
 
-  let result = await generateOnce(business, qas, variation, recentDrafts);
+  let result = await generateOnce(business, qas, variation, recentDrafts, usage);
 
-  if (recentDrafts.length > 0 && draftTooSimilar(result.draftText, recentDrafts)) {
+  // Live customer drafts skip the similarity re-roll — a second Gemini pass
+  // often pushes Cloudflare Workers past the request time limit (HTTP 503).
+  if (
+    options?.antiRepeatRetry !== false &&
+    recentDrafts.length > 0 &&
+    draftTooSimilar(result.draftText, recentDrafts)
+  ) {
     const retryVariation = hasAnswers
       ? pickVariationRetry(qas, variation)
       : pickNoAnswerVariationRetry(themes, variation);
-    result = await generateOnce(business, qas, retryVariation, recentDrafts);
+    result = await generateOnce(business, qas, retryVariation, recentDrafts, usage);
   }
 
   return result;
+}
+
+/**
+ * Pre-generate a backlog draft for a target sentiment (no real customer answers).
+ */
+export async function draftBacklogReviewWithGemini(
+  business: BusinessContext,
+  sentiment: "positive" | "neutral" | "negative",
+  recentDrafts: string[] = [],
+  businessId?: string | null
+): Promise<GeminiDraftResult> {
+  const usage: GeminiUsageContext = {
+    purpose: "backlog",
+    businessId,
+    requestId: crypto.randomUUID(),
+  };
+  const themes = (business.reviewThemes ?? []).filter((t) => t.trim());
+  const variation = pickNoAnswerVariation(themes);
+  const tone =
+    sentiment === "positive"
+      ? "Write a short positive review. Friendly, understated, everyday speech. No I'll-be-back closer."
+      : sentiment === "negative"
+        ? "Write a short constructive negative review. Calm and specific (e.g. wait was long), not insulting. Do not praise the visit."
+        : "Write a short mixed/neutral review. Okay but not great — something average about service, wait, or value.";
+
+  const fullPrompt = `You are drafting a Google review for this business to keep as a standby fallback.
+Target sentiment for THIS draft: ${sentiment}
+${tone}
+
+${formatBusinessContext(business, variation.highlightTheme)}
+
+VARIATION FOR THIS DRAFT:
+${formatVariationBlock(variation, true)}
+${formatRepetitionGuards(recentDrafts)}
+${SELECTIVE_CONTEXT_RULES}
+${formatBannedLanguageRules()}
+${NO_RETURN_SIGN_OFF}
+${CONSTRUCTIVE_TONE_RULES}
+${formatWriteRules([
+  `Return sentiment exactly as "${sentiment}"`,
+  "Stay true to the category and description — do not invent menu items or staff names",
+  "Never use opening + praise + I'll-be-back formula",
+  "Spoken Indian English — not American review-speak",
+  "Obey the HARD RULE — LENGTH block exactly (word count + sentence/line shape)",
+])}
+
+Respond ONLY with JSON:
+{"draftText": "...", "sentiment": "${sentiment}"}`;
+
+  const litePrompt = `Write a short Google review for ${business.name} in spoken Indian English. Target sentiment: ${sentiment}.
+${business.category ? `Type: ${business.category}` : ""}
+${variation.highlightTheme ? `Angle: ${variation.highlightTheme}` : ""}
+${tone}
+${lengthHintForLite(variation)}
+VOICE (must be obvious): ${variation.voice.label}
+Do: ${variation.voice.dos[0]}
+Don't: ${variation.voice.donts[0]}
+Everyday speech with contractions. No visit-again closer.
+
+Respond ONLY with JSON: {"draftText":"...","sentiment":"${sentiment}"}`;
+
+  const primaryModel = getModel();
+  const attempts: { model: string; prompt: string }[] = [
+    { model: primaryModel, prompt: fullPrompt },
+  ];
+  if (primaryModel !== FALLBACK_MODEL) {
+    attempts.push({ model: FALLBACK_MODEL, prompt: litePrompt });
+  }
+
+  let lastError: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, prompt } = attempts[i];
+    try {
+      const text = await generateGeminiTextForModel(prompt, model, {
+        json: true,
+        temperature: 1,
+        usage,
+      });
+      const parsed = parseDraftJson(text);
+      return { draftText: parsed.draftText, sentiment };
+    } catch (err) {
+      lastError = err;
+      const next = attempts[i + 1];
+      if (next) {
+        console.warn(`Gemini backlog model ${model} failed, trying ${next.model}:`, err);
+      }
+    }
+  }
+
+  throw lastError;
 }

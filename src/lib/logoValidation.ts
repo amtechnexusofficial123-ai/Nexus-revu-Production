@@ -1,4 +1,4 @@
-const MAX_LOGO_CHARS = 400_000;
+const MAX_LOGO_CHARS = 80_000;
 
 /**
  * Normalizes / validates a logo value from the client.

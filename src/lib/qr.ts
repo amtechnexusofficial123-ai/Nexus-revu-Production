@@ -1,11 +1,22 @@
 import QRCode from "qrcode";
 
-/** Generates a QR code as a data URL pointing at the customer review page. */
-export async function generateQrDataUrl(url: string): Promise<string> {
+/** Fast on-screen preview size (client-side). */
+export const QR_PREVIEW_SIZE = 384;
+/** Print / download size (generated only when downloading). */
+export const QR_PRINT_SIZE = 2048;
+
+const QR_COLORS = { dark: "#14171C", light: "#FAF9F6" } as const;
+
+/** Generates a QR code as a PNG data URL. */
+export async function generateQrDataUrl(
+  url: string,
+  options?: { width?: number }
+): Promise<string> {
   return QRCode.toDataURL(url, {
-    width: 512,
+    width: options?.width ?? QR_PREVIEW_SIZE,
     margin: 2,
-    color: { dark: "#14171C", light: "#FAF9F6" },
+    errorCorrectionLevel: "M",
+    color: QR_COLORS,
   });
 }
 

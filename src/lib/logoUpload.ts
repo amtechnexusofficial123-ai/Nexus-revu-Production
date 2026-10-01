@@ -28,9 +28,9 @@ export async function fileToLogoDataUrl(file: File): Promise<string> {
   ctx.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
 
-  const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-  // Keep DB rows reasonable (~400KB of base64)
-  if (dataUrl.length > 400_000) {
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+  // Keep customer JSON payloads tiny — large data URLs caused mobile truncation.
+  if (dataUrl.length > 48_000) {
     throw new Error("Image is still too large after compression. Try a simpler photo.");
   }
   return dataUrl;

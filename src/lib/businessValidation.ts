@@ -2,6 +2,7 @@ import {
   parseReviewThemes,
   validateReviewThemes,
 } from "@/lib/reviewThemes";
+import { normalizeWhatsAppNumber, validateWhatsAppNumber } from "@/lib/whatsapp";
 
 type BusinessDetailsInput = {
   name?: string;
@@ -10,6 +11,7 @@ type BusinessDetailsInput = {
   description?: string;
   reviewThemes?: string | string[];
   googlePlaceId?: string;
+  whatsappNumber?: string;
 };
 
 export function validateBusinessDetails(input: BusinessDetailsInput): string | null {
@@ -23,6 +25,10 @@ export function validateBusinessDetails(input: BusinessDetailsInput): string | n
   if (themesError) return themesError;
 
   if (!input.googlePlaceId?.trim()) return "Google Place ID is required";
+
+  const whatsappError = validateWhatsAppNumber(input.whatsappNumber);
+  if (whatsappError) return whatsappError;
+
   return null;
 }
 
@@ -35,5 +41,6 @@ export function normalizeBusinessDetails(input: BusinessDetailsInput) {
     description: input.description!.trim(),
     reviewThemes: themes,
     googlePlaceId: input.googlePlaceId!.trim(),
+    whatsappNumber: normalizeWhatsAppNumber(input.whatsappNumber),
   };
 }

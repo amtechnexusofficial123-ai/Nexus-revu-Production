@@ -17,7 +17,16 @@ export default async function DashboardLayout({ children }: { children: React.Re
               Nexus<span className="text-brand">Revu</span>
             </span>
           </Link>
-          <nav className="flex shrink-0 items-center gap-5 text-sm font-medium text-ink/70">
+          <nav className="flex shrink-0 items-center gap-4 text-sm font-medium text-ink/70 sm:gap-5">
+            <Link href="/dashboard" className="hover:text-ink">
+              Businesses
+            </Link>
+            <Link href="/dashboard/activity" className="hover:text-ink">
+              Activity
+            </Link>
+            <Link href="/dashboard/errors" className="hover:text-ink">
+              Errors
+            </Link>
             <LogoutButton />
           </nav>
         </div>

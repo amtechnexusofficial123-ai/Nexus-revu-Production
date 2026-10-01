@@ -3,10 +3,10 @@ import { db } from "@/db";
 import { businesses, questions } from "@/db/schema";
 import { getSessionAdminId } from "@/lib/auth";
 import {
-  normalizeQuestionsForInsert,
   validateQuestionSet,
   type IncomingQuestion,
 } from "@/lib/questions";
+import { replaceBusinessQuestions } from "@/lib/replaceQuestions";
 import { eq, and } from "drizzle-orm";
 
 async function assertOwnership(businessId: string, adminId: string) {
@@ -50,17 +50,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const error = validateQuestionSet(incoming ?? []);
   if (error) return NextResponse.json({ error }, { status: 400 });
 
-  await db.delete(questions).where(eq(questions.businessId, id));
-
-  if (incoming.length > 0) {
-    await db.insert(questions).values(normalizeQuestionsForInsert(id, incoming));
-  }
-
-  const saved = await db
-    .select()
-    .from(questions)
-    .where(eq(questions.businessId, id))
-    .orderBy(questions.position);
+  const saved = await replaceBusinessQuestions(id, incoming ?? []);
 
   return NextResponse.json({ questions: saved });
 }
