@@ -1,39 +1,36 @@
 export type QA = { question: string; answer: string };
 
-export type LengthMode = "single" | "two_liner" | "short";
+export type LengthMode = "single" | "two_liner" | "medium";
 
 /** Length bands baked into the first Gemini prompt (no re-roll). */
 export type LengthBand = {
   minWords: number;
   maxWords: number;
-  /** At most this many sentences (single). */
-  maxSentences?: number;
-  /** Exactly this many sentences OR newline-separated lines (two_liner). */
-  exactUnits?: number;
+  /** Sentence range — lite models follow sentence counts far better than word counts. */
+  minSentences: number;
+  maxSentences: number;
 };
 
 export const LENGTH_BANDS: Record<LengthMode, LengthBand> = {
-  single: { minWords: 8, maxWords: 18, maxSentences: 1 },
-  two_liner: { minWords: 14, maxWords: 32, exactUnits: 2 },
-  short: { minWords: 28, maxWords: 55 },
+  single: { minWords: 8, maxWords: 18, minSentences: 1, maxSentences: 1 },
+  two_liner: { minWords: 14, maxWords: 32, minSentences: 2, maxSentences: 2 },
+  medium: { minWords: 40, maxWords: 70, minSentences: 3, maxSentences: 5 },
 };
 
 /** Aim points inside each hard band (never outside). */
-export const TARGET_LENGTHS = [32, 38, 44, 50] as const;
+export const TARGET_LENGTHS = [45, 52, 58, 65] as const;
 export const SINGLE_SENTENCE_TARGET_LENGTHS = [10, 12, 14, 16] as const;
 export const TWO_LINER_TARGET_LENGTHS = [18, 22, 26, 30] as const;
 
-/** Messy / non-formula shapes — never opening + service + closing.
+/** Non-formula shapes for medium drafts — never opening + service + closing.
  *  No example openers in the text — models copy those into every draft. */
 export const STRUCTURE_SEEDS = [
-  "One casual sentence only — stop there, no wrap-up",
-  "Two short lines that feel a bit disjointed, like a phone note",
-  "Start mid-thought and trail off — no stock opener",
-  "Just dump one specific detail — no intro, no closing",
-  "Sound like a rough text to a friend — incomplete ok",
-  "Lead with the answer, then a half-finished second beat",
-  "Tiny fragment first, then one plain sentence",
-  "Skip the setup — jump straight into what stood out",
+  "Start mid-thought, no stock opener, then add two or three more details",
+  "Jump straight into what stood out, then cover a second and third detail",
+  "Sound like telling a friend about the visit, a few relaxed sentences",
+  "Lead with the answer, then explain why in a couple of sentences",
+  "Short fragment first, then a few plain sentences with specifics",
+  "Go through what you tried, how it was, and one small extra observation",
 ] as const;
 
 /** Sharply different voices so drafts don't all blend into the same casual tone. */
@@ -49,7 +46,7 @@ export const VOICE_PROFILES: readonly VoiceProfile[] = [
     id: "blunt",
     label: "Blunt / matter-of-fact",
     dos: [
-      "Short plain statements only",
+      "Plain statements only",
       "Say what happened with almost no softener",
       "Sound decisive — like stating a fact",
     ],
@@ -106,7 +103,7 @@ export const VOICE_PROFILES: readonly VoiceProfile[] = [
     label: "Choppy / phone-note",
     dos: [
       "Broken rhythm — fragments ok",
-      "Very short beats, almost incomplete",
+      "Short punchy beats, several of them",
       "Feels typed in a hurry",
     ],
     donts: [
@@ -120,13 +117,30 @@ export const VOICE_PROFILES: readonly VoiceProfile[] = [
 /** @deprecated Use VOICE_PROFILES — kept for any old imports. */
 export const VOICE_SEEDS = VOICE_PROFILES.map((v) => v.label);
 
+/** Natural Indian English patterns; 3 are drawn per draft so drafts don't all share the same phrases. */
+export const INDIAN_ENGLISH_TOUCHES = [
+  'Use "quite" or "very" as everyday intensifiers ("quite good", "very slow", "very cooperative")',
+  'Treat staff as singular ("staff was polite", "staff was very cooperative")',
+  'If price comes up, say "value for money", "reasonable rates", "bit costly" or "on the higher side"',
+  'Say "ambience" instead of "atmosphere" or "vibe"',
+  'If cleanliness comes up, say "neat and clean" or mention hygiene',
+  'Use emphatic "only" or "itself" once, the way people talk ("got it fresh only", "service itself was slow")',
+  'Place "also" Indian style ("prices are also reasonable", "staff was also helpful")',
+  'Address the business once directly, like "keep it up" if positive or "please improve the waiting time" if not',
+  'Use "superb" or "too good" for praise, or "not up to the mark" for criticism',
+  'Drop the "a" before "bit" once ("bit crowded", "bit costly")',
+  'Describe service as "prompt", "quick" or "slow" ("service was prompt")',
+  'Use "had" for eating or trying something ("had their cold coffee"), only for items in the answers',
+  'Suggest lightly with "do try" or "can go for it" if positive, or "management should look into this" if not',
+  'Sum up one thing with "overall" ("overall good", "overall bit disappointing")',
+] as const;
+
 export const CONTENT_FOCUS_SEEDS = [
   "Focus on one product or thing they tried",
   "Focus on first impression walking in",
   "Focus on staff or how they were treated",
   "Focus on quality or value",
   "Focus on atmosphere or vibe",
-  "Focus on a specific occasion (quick stop, birthday order, etc.)",
   "Focus on one concrete detail from context — nothing else",
 ] as const;
 
@@ -141,18 +155,19 @@ export type VariationBundle = {
   highlightTheme?: string;
   singleSentence: boolean;
   lengthMode: LengthMode;
+  indianTouches: string[];
 };
 
 const SINGLE_STRUCTURE = "One casual sentence only — stop there, no wrap-up";
 const TWO_LINER_STRUCTURE =
   "Two short lines that feel a bit disjointed, like a phone note";
 
-/** ~35% single, ~35% two-liner, ~30% short multi. */
+/** ~35% single, ~35% two-liner, ~30% medium. */
 function pickLengthMode(): LengthMode {
   const r = Math.random();
   if (r < 0.35) return "single";
   if (r < 0.7) return "two_liner";
-  return "short";
+  return "medium";
 }
 
 function pickTargetWords(mode: LengthMode): number {
@@ -164,10 +179,7 @@ function pickTargetWords(mode: LengthMode): number {
 function pickStructureSeed(mode: LengthMode): string {
   if (mode === "single") return SINGLE_STRUCTURE;
   if (mode === "two_liner") return TWO_LINER_STRUCTURE;
-  const multi = STRUCTURE_SEEDS.filter(
-    (s) => s !== SINGLE_STRUCTURE && s !== TWO_LINER_STRUCTURE
-  );
-  return pickRandom(multi);
+  return pickRandom(STRUCTURE_SEEDS);
 }
 
 function pickRandom<T>(items: readonly T[]): T {
@@ -176,6 +188,24 @@ function pickRandom<T>(items: readonly T[]): T {
 
 function pickVoice(): VoiceProfile {
   return pickRandom(VOICE_PROFILES);
+}
+
+function pickIndianTouches(count = 3): string[] {
+  return [...INDIAN_ENGLISH_TOUCHES].sort(() => Math.random() - 0.5).slice(0, count);
+}
+
+/** Hard Indian English block — placed at the top of prompts so lite models weight it. */
+export function formatIndianEnglishRules(touches: string[], lengthMode: LengthMode): string {
+  const minTouches = lengthMode === "medium" ? "at least TWO" : "at least ONE";
+  return `HARD RULE — INDIAN ENGLISH (most important style rule):
+- Write the way an Indian customer actually types a Google review, NOT American or British review English
+- British/Indian spelling (flavour, colour, favourite, centre, organised)
+- Indian everyday words: washroom (not restroom), takeaway (not takeout), bill (not check), mobile (not cell phone)
+- No American slang or hype ("awesome", "super cute", "stoked", "y'all", "gotten")
+- Plain simple sentences; contractions optional
+- Natural, not a parody: no Hindi words, no fake accent, no deliberate typos or broken grammar
+Use ${minTouches} of these Indian English touches for THIS draft, worked in naturally:
+${touches.map((t) => `- ${t}`).join("\n")}`;
 }
 
 /** Hard voice block for prompts — must be obvious in the output. */
@@ -206,8 +236,9 @@ function buildBundle(
     singleSentence: lengthMode === "single",
     lengthMode,
     contentFocusSeed:
-      lengthMode === "short" ? extras?.contentFocusSeed : undefined,
+      lengthMode === "medium" ? extras?.contentFocusSeed : undefined,
     highlightTheme: extras?.highlightTheme,
+    indianTouches: pickIndianTouches(),
   };
 }
 
@@ -219,20 +250,21 @@ export function formatLengthHardRule(
   const band = LENGTH_BANDS[mode];
   if (mode === "single") {
     return `HARD RULE — LENGTH (must follow on the first try):
-- Mode: ONE casual sentence only — no second sentence, no wrap-up
+- Write exactly ONE casual sentence — no second sentence, no wrap-up
 - Word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
-- Count the words before you finish — do not write a paragraph`;
+- Do not write a paragraph`;
   }
   if (mode === "two_liner") {
     return `HARD RULE — LENGTH (must follow on the first try):
-- Mode: exactly TWO short lines (or two short sentences), a bit disjointed
+- Write exactly TWO sentences (or two lines), a bit disjointed
 - Word count MUST be between ${band.minWords} and ${band.maxWords} total (aim ~${targetWords})
-- Count the words before you finish — not a polished single paragraph`;
+- Not a polished single paragraph`;
   }
   return `HARD RULE — LENGTH (must follow on the first try):
-- Mode: short multi-beat review — uneven shape, not a neat essay
-- Word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
-- Count the words before you finish — do not collapse into one tiny sentence`;
+- Write ${band.minSentences} to ${band.maxSentences} sentences — fewer than ${band.minSentences} is a failure
+- Total word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
+- Each sentence adds something different (a detail, a reaction, a small observation) — no filler or repetition
+- Uneven, natural shape — not a neat essay, but do not stop after one or two sentences`;
 }
 
 export function pickVariation(qas: QA[]): VariationBundle {

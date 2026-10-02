@@ -62,6 +62,88 @@ const MARKETING_PHRASES = [
   "delightful",
 ] as const;
 
+/** American → Indian/British spelling and everyday words. Whole-word, case preserved. */
+const INDIAN_ENGLISH_SWAPS: Record<string, string> = {
+  color: "colour",
+  colors: "colours",
+  colorful: "colourful",
+  flavor: "flavour",
+  flavors: "flavours",
+  flavorful: "flavourful",
+  flavored: "flavoured",
+  favorite: "favourite",
+  favorites: "favourites",
+  behavior: "behaviour",
+  neighborhood: "neighbourhood",
+  savory: "savoury",
+  organized: "organised",
+  realized: "realised",
+  apologized: "apologised",
+  customized: "customised",
+  recognized: "recognised",
+  restroom: "washroom",
+  restrooms: "washrooms",
+  takeout: "takeaway",
+  elevator: "lift",
+  "cell phone": "mobile",
+  gotten: "got",
+  awesome: "superb",
+};
+
+function matchCase(source: string, replacement: string): string {
+  if (source === source.toUpperCase() && source.length > 1) return replacement.toUpperCase();
+  if (source[0] === source[0].toUpperCase()) {
+    return replacement[0].toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
+function applyIndianEnglishSwaps(text: string): string {
+  let s = text;
+  for (const [from, to] of Object.entries(INDIAN_ENGLISH_SWAPS)) {
+    s = s.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), (m) => matchCase(m, to));
+  }
+  return s;
+}
+
+/**
+ * Invented visit context (meal, time of day, companions). Each group is stripped
+ * only when the customer's answers don't mention that kind of thing.
+ */
+const VISIT_CONTEXT_GROUPS: { mentioned: RegExp; strip: RegExp[] }[] = [
+  {
+    mentioned: /\b(breakfast|brunch|lunch|dinner|supper)\b/i,
+    strip: [
+      /,?\s*\b(?:for|over|at|during)\s+(?:a\s+|an\s+|our\s+|my\s+)?(?:quick\s+|late\s+|early\s+|family\s+|weekend\s+)?(?:breakfast|brunch|lunch|dinner|supper)\b/gi,
+    ],
+  },
+  {
+    mentioned: /\b(morning|afternoon|evening|night|tonight|yesterday|weekend|sunday|saturday|friday)\b/i,
+    strip: [
+      /,?\s*\b(?:last|this|one|on\s+a|on\s+the|in\s+the)\s+(?:night|evening|morning|afternoon|weekend|sunday|saturday|friday)\b/gi,
+      /,?\s*\bover\s+the\s+weekend\b/gi,
+      /,?\s*\b(?:tonight|yesterday)\b/gi,
+    ],
+  },
+  {
+    mentioned: /\b(wife|husband|family|friends?|kids|children|parents|girlfriend|boyfriend|partner|colleagues?|date|fiance|fiancee|cousins?)\b/i,
+    strip: [
+      /,?\s*\b(?:along\s+with|with)\s+(?:my\s+|our\s+|a\s+|some\s+)?(?:whole\s+|entire\s+|close\s+)?(?:wife|husband|family|friends?|kids|children|parents|mom|mum|dad|girlfriend|boyfriend|partner|colleagues?|fiance|fiancee|cousins?|date)\b/gi,
+      /,?\s*\bon\s+a\s+date(?:\s+night)?\b/gi,
+    ],
+  },
+];
+
+function stripUnmentionedVisitContext(text: string, answersText: string): string {
+  let s = text;
+  for (const group of VISIT_CONTEXT_GROUPS) {
+    if (group.mentioned.test(answersText)) continue;
+    for (const pattern of group.strip) s = s.replace(pattern, "");
+  }
+  // A phrase removed from the start of a sentence can leave a dangling comma.
+  return s.replace(/^[\s,]+/, "").replace(/([.!?]\s+),\s*/g, "$1");
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -135,7 +217,8 @@ function maybeSoftenExclaim(text: string): string {
   return text.slice(0, last) + replacement + text.slice(last + 1);
 }
 
-export function humanizeReview(text: string): string {
+/** `answersText` is the customer's Q&A; visit context they mentioned is kept. */
+export function humanizeReview(text: string, answersText = ""): string {
   let s = text.trim();
 
   // Em / en dashes → comma
@@ -148,6 +231,8 @@ export function humanizeReview(text: string): string {
   s = s.replace(/([.!?,])\1+/g, "$1");
 
   s = stripMarketingPhrases(s);
+  s = stripUnmentionedVisitContext(s, answersText);
+  s = applyIndianEnglishSwaps(s);
   s = normalizePunctuationSpacing(s);
 
   s = maybeDropOneComma(s);
