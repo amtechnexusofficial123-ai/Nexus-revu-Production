@@ -407,7 +407,9 @@ Background (accuracy only, do NOT recite the full list): ${description}`;
 function formatVariationBlock(variation: VariationBundle, noAnswers: boolean): string {
   const lines = [
     formatLengthHardRule(variation.lengthMode, variation.targetWords),
-    variation.lengthMode === "medium" ? `- Shape: ${variation.structureSeed}` : "",
+    variation.lengthMode === "medium" || variation.lengthMode === "long"
+      ? `- Shape: ${variation.structureSeed}`
+      : "",
     "",
     formatVoiceHardRules(variation.voice),
   ].filter(Boolean);
@@ -594,7 +596,9 @@ ${formatWriteRules([
     ? "Write exactly one casual sentence — no wrap-up"
     : variation.lengthMode === "two_liner"
       ? "Write two short uneven lines — ok if they feel a bit disconnected"
-      : "Write 3 to 5 sentences, each adding a different detail — uneven shape, never opening + service note + closing",
+      : variation.lengthMode === "long"
+        ? "Write a fuller review with several concrete details — casual and natural, not an essay"
+        : "Write 3 to 5 sentences, each adding a different detail — uneven shape, never opening + service note + closing",
 ])}
 
 ${INDIAN_ENGLISH_REMINDER}

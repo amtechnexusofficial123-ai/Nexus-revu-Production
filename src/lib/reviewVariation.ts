@@ -1,6 +1,6 @@
 export type QA = { question: string; answer: string };
 
-export type LengthMode = "single" | "two_liner" | "medium";
+export type LengthMode = "single" | "two_liner" | "medium" | "long";
 
 /** Length bands baked into the first Gemini prompt (no re-roll). */
 export type LengthBand = {
@@ -15,12 +15,14 @@ export const LENGTH_BANDS: Record<LengthMode, LengthBand> = {
   single: { minWords: 8, maxWords: 18, minSentences: 1, maxSentences: 1 },
   two_liner: { minWords: 14, maxWords: 32, minSentences: 2, maxSentences: 2 },
   medium: { minWords: 40, maxWords: 70, minSentences: 3, maxSentences: 5 },
+  long: { minWords: 130, maxWords: 160, minSentences: 7, maxSentences: 10 },
 };
 
 /** Aim points inside each hard band (never outside). */
 export const TARGET_LENGTHS = [45, 52, 58, 65] as const;
 export const SINGLE_SENTENCE_TARGET_LENGTHS = [10, 12, 14, 16] as const;
 export const TWO_LINER_TARGET_LENGTHS = [18, 22, 26, 30] as const;
+export const LONG_TARGET_LENGTHS = [135, 142, 150, 158] as const;
 
 /** Non-formula shapes for medium drafts — never opening + service + closing.
  *  No example openers in the text — models copy those into every draft. */
@@ -31,6 +33,13 @@ export const STRUCTURE_SEEDS = [
   "State the main point first, then explain why in a couple of sentences",
   "Short fragment first, then a few plain sentences with specifics",
   "Go through what you tried, how it was, and one small extra observation",
+] as const;
+
+export const LONG_STRUCTURE_SEEDS = [
+  "Start with the main impression, then move through several concrete details naturally",
+  "Build from one standout detail into a fuller account with small observations",
+  "Sound like a thoughtful customer writing a fuller review, not a neat essay",
+  "Let the review wander through what they tried, how it felt, and what stood out",
 ] as const;
 
 /** How the first sentence starts. No example openers — models copy those verbatim. */
@@ -176,20 +185,25 @@ const SINGLE_STRUCTURE = "One casual sentence only — stop there, no wrap-up";
 const TWO_LINER_STRUCTURE =
   "Two short lines that feel a bit disjointed, like a phone note";
 
-/** ~20% two-liner, ~80% medium. Single-sentence drafts are no longer picked. */
+/** ~10% two-liner, ~10% long, ~80% medium. Single-sentence drafts are no longer picked. */
 function pickLengthMode(): LengthMode {
-  return Math.random() < 0.2 ? "two_liner" : "medium";
+  const roll = Math.random();
+  if (roll < 0.1) return "two_liner";
+  if (roll < 0.2) return "long";
+  return "medium";
 }
 
 function pickTargetWords(mode: LengthMode): number {
   if (mode === "single") return pickRandom(SINGLE_SENTENCE_TARGET_LENGTHS);
   if (mode === "two_liner") return pickRandom(TWO_LINER_TARGET_LENGTHS);
+  if (mode === "long") return pickRandom(LONG_TARGET_LENGTHS);
   return pickRandom(TARGET_LENGTHS);
 }
 
 function pickStructureSeed(mode: LengthMode): string {
   if (mode === "single") return SINGLE_STRUCTURE;
   if (mode === "two_liner") return TWO_LINER_STRUCTURE;
+  if (mode === "long") return pickRandom(LONG_STRUCTURE_SEEDS);
   return pickRandom(STRUCTURE_SEEDS);
 }
 
@@ -216,7 +230,8 @@ function pickIndianTouches(count = 3): string[] {
 
 /** Hard Indian English block — placed at the top of prompts so lite models weight it. */
 export function formatIndianEnglishRules(touches: string[], lengthMode: LengthMode): string {
-  const minTouches = lengthMode === "medium" ? "at least TWO" : "at least ONE";
+  const minTouches =
+    lengthMode === "medium" || lengthMode === "long" ? "at least TWO" : "at least ONE";
   return `HARD RULE — INDIAN ENGLISH (most important style rule):
 - Write the way an Indian customer actually types a Google review, NOT American or British review English
 - British/Indian spelling (flavour, colour, favourite, centre, organised)
@@ -263,7 +278,9 @@ function buildBundle(
     singleSentence: lengthMode === "single",
     lengthMode,
     contentFocusSeed:
-      lengthMode === "medium" ? extras?.contentFocusSeed : undefined,
+      lengthMode === "medium" || lengthMode === "long"
+        ? extras?.contentFocusSeed
+        : undefined,
     highlightTheme: extras?.highlightTheme,
     indianTouches: pickIndianTouches(),
   };
@@ -287,6 +304,13 @@ export function formatLengthHardRule(
 - Word count MUST be between ${band.minWords} and ${band.maxWords} total (aim ~${targetWords})
 - Not a polished single paragraph`;
   }
+  if (mode === "long") {
+    return `HARD RULE — LENGTH (must follow on the first try):
+- Write ${band.minSentences} to ${band.maxSentences} sentences
+- Total word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
+- Cover several concrete details from the answers/context; do not pad with generic praise
+- Natural, uneven flow — not an essay, a list, or a polished intro-body-conclusion shape`;
+  }
   return `HARD RULE — LENGTH (must follow on the first try):
 - Write ${band.minSentences} to ${band.maxSentences} sentences — fewer than ${band.minSentences} is a failure
 - Total word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
@@ -300,7 +324,12 @@ export function pickVariation(qas: QA[]): VariationBundle {
     return buildBundle({ question: "overall experience", answer: "positive visit" });
   }
   const lengthMode = pickLengthMode();
-  const featureCount = lengthMode === "medium" ? 2 + Math.floor(Math.random() * 2) : 2;
+  const featureCount =
+    lengthMode === "long"
+      ? 3
+      : lengthMode === "medium"
+        ? 2 + Math.floor(Math.random() * 2)
+        : 2;
   // Bare ratings ("5/5") give the model nothing concrete to open with, so they go last.
   const byContent = [
     ...answerOrder.filter((qa) => !isBareRating(qa.answer)),
