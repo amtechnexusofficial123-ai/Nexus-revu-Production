@@ -15,7 +15,6 @@ import {
 import { formatAnswerForDisplay, type QuestionType } from "@/lib/questionTypes";
 import { isCustomerQrActive } from "@/lib/billing";
 import { errorDetail, formatErrorDetail, logAppError } from "@/lib/errorLog";
-import { checkDraftVelocity } from "@/lib/reviewVelocity";
 import { desc, eq } from "drizzle-orm";
 
 type Body = {
@@ -67,7 +66,7 @@ async function buildDraft(
           },
           formatted,
           recentDrafts,
-          { antiRepeatRetry: false, businessId: business.id, sessionId }
+          { liveBudgetMs: LIVE_GEMINI_BUDGET_MS, businessId: business.id, sessionId }
         ),
         LIVE_GEMINI_BUDGET_MS,
         "Gemini live draft budget exceeded"
@@ -126,14 +125,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const velocity = await checkDraftVelocity(business.id);
-    if (velocity.exceeded) {
-      return NextResponse.json(
-        { error: velocity.message ?? "Please try again later." },
-        { status: 429 }
-      );
-    }
-
     // Do NOT start backlog refill here — concurrent Gemini calls during the
     // customer draft are a common cause of Cloudflare HTTP 503s.
 
@@ -149,7 +140,7 @@ export async function POST(req: NextRequest) {
       .from(reviewSessions)
       .where(eq(reviewSessions.businessId, business.id))
       .orderBy(desc(reviewSessions.createdAt))
-      .limit(5);
+      .limit(20);
 
     const recentDrafts = recentRows
       .map((r) => r.draftText)

@@ -2,8 +2,8 @@
  * Cleans model output so reviews read like a person typed them, not marketing copy.
  * Light "mess" only — never parody typos or stacked slang.
  */
-/** ~40% start lowercase for a casual note feel. */
-const CASUAL_LOWER_FIRST_CHANCE = 0.4;
+/** ~15% start lowercase for a casual note feel. */
+const CASUAL_LOWER_FIRST_CHANCE = 0.15;
 /** ~40% drop the trailing period. */
 const DROP_FINAL_PERIOD_CHANCE = 0.4;
 /** Soften AI-perfect commas. */
@@ -32,38 +32,39 @@ const MARKETING_PHRASES = [
   "i will be back",
   "see you soon",
   "until next time",
-  "highly recommended",
-  "highly recommend",
-  "amazing experience",
-  "exceptional service",
-  "perfect experience",
-  "overall experience",
-  "went above and beyond",
-  "above and beyond",
   "you won't be disappointed",
-  "exceeded expectations",
   "cannot say enough",
   "can't say enough",
-  "gem of a place",
   "don't hesitate",
-  "hidden gem",
-  "must visit",
-  "must try",
-  "must-try",
-  "top notch",
-  "top-notch",
-  "five stars",
-  "second to none",
-  "absolutely loved",
-  "truly wonderful",
   "hands down",
-  "atmosphere was",
-  "exceptional",
-  "delightful",
 ] as const;
 
+/** A list means one option is picked at random per match, so drafts don't converge on one word. */
+type Swaps = Record<string, string | readonly string[]>;
+
+/**
+ * Clichés that sit mid-sentence, so deleting them would leave a broken sentence.
+ * Swapped for plain wording instead. Longest first.
+ */
+const CLICHE_SWAPS: Swaps = {
+  "went above and beyond": ["went out of their way", "really took care of me", "were very helpful"],
+  "exceptional service": ["very good service", "really good service", "excellent service"],
+  "exceeded expectations": ["was better than expected", "was more than I expected"],
+  "amazing experience": ["good experience", "nice experience", "really good experience"],
+  "perfect experience": ["good experience", "nice experience", "really good experience"],
+  "absolutely loved": ["really liked", "loved", "enjoyed"],
+  "truly wonderful": ["very nice", "really nice", "lovely"],
+  "second to none": ["very good", "really good"],
+  "gem of a place": ["nice place", "good place"],
+  "hidden gem": ["nice find", "good find"],
+  "top notch": ["very good", "excellent", "first class"],
+  "five stars": "full marks",
+  exceptional: ["very good", "excellent", "really good"],
+  delightful: ["very nice", "lovely", "really nice"],
+};
+
 /** American → Indian/British spelling and everyday words. Whole-word, case preserved. */
-const INDIAN_ENGLISH_SWAPS: Record<string, string> = {
+const INDIAN_ENGLISH_SWAPS: Swaps = {
   color: "colour",
   colors: "colours",
   colorful: "colourful",
@@ -87,7 +88,28 @@ const INDIAN_ENGLISH_SWAPS: Record<string, string> = {
   elevator: "lift",
   "cell phone": "mobile",
   gotten: "got",
-  awesome: "superb",
+  awesome: ["superb", "excellent", "very nice"],
+};
+
+/**
+ * British understatement in positive drafts ("ambience is fine") reads lukewarm.
+ * Only applied to positive drafts — neutral/negative "fine" is meant literally. Longest first.
+ */
+const POSITIVE_UNDERSTATEMENT_SWAPS: Swaps = {
+  "not bad at all": ["really good", "very good"],
+  "decent enough": ["good", "nice"],
+  "pretty decent": ["good", "nice"],
+  "quite decent": ["quite good", "quite nice"],
+  "quite fine": ["quite good", "quite nice"],
+  "turned out fine": ["turned out good", "turned out nice"],
+  "rather good": ["very good", "really good"],
+  "is fine": ["is nice", "is good"],
+  "was fine": ["was nice", "was good"],
+  "are fine": ["are nice", "are good"],
+  "were fine": ["were nice", "were good"],
+  "looks fine": ["looks nice", "looks good"],
+  "felt fine": ["felt nice", "felt good"],
+  decent: ["good", "nice"],
 };
 
 function matchCase(source: string, replacement: string): string {
@@ -98,10 +120,13 @@ function matchCase(source: string, replacement: string): string {
   return replacement;
 }
 
-function applyIndianEnglishSwaps(text: string): string {
+function applySwaps(text: string, swaps: Swaps): string {
   let s = text;
-  for (const [from, to] of Object.entries(INDIAN_ENGLISH_SWAPS)) {
-    s = s.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), (m) => matchCase(m, to));
+  for (const [from, to] of Object.entries(swaps)) {
+    s = s.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi"), (m) => {
+      const pick = typeof to === "string" ? to : to[Math.floor(Math.random() * to.length)];
+      return matchCase(m, pick);
+    });
   }
   return s;
 }
@@ -144,6 +169,39 @@ function stripUnmentionedVisitContext(text: string, answersText: string): string
   return s.replace(/^[\s,]+/, "").replace(/([.!?]\s+),\s*/g, "$1");
 }
 
+/** Filler topics the model invents; a sentence on one is dropped unless the Q&A raises it. */
+const UNPROMPTED_TOPICS: RegExp[] = [
+  /\b(washrooms?|restrooms?|toilets?|bathrooms?|loo)\b/i,
+  /\bparking\b/i,
+];
+
+const IMPROVEMENT_DEMAND =
+  /\b(?:management|owners?|they|staff)\s+(?:must|should|needs? to|has to|have to)\b|\bplease\s+(?:improve|maintain|fix|look into)\b|\bneeds?\s+(?:improvement|to be improved)\b|\bcould (?:be|do) (?:a bit )?better\b|\bscope for improvement\b|\bonly (?:complaint|issue|downside|problem)\b/i;
+
+const ANSWER_COMPLAINT =
+  /\b(not|no|never|bad|poor|slow|late|cold|dirty|rude|costly|expensive|overpriced|average|okay|ok|improve|issue|problem|complain\w*|disappoint\w*|wait(?:ed|ing)?)\b/i;
+const LOW_RATING = /^\s*[1-3](?:\s*\/\s*5|\s*stars?)?\s*$/i;
+
+function answersHaveComplaint(answers: string[]): boolean {
+  return answers.some((a) => LOW_RATING.test(a) || ANSWER_COMPLAINT.test(a));
+}
+
+function dropInventedSentences(
+  text: string,
+  answersText: string,
+  sentiment: string | undefined,
+  answers: string[]
+): string {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const dropDemands = sentiment === "positive" && !answersHaveComplaint(answers);
+  const kept = sentences.filter((sentence) => {
+    if (UNPROMPTED_TOPICS.some((t) => t.test(sentence) && !t.test(answersText))) return false;
+    if (dropDemands && IMPROVEMENT_DEMAND.test(sentence)) return false;
+    return true;
+  });
+  return kept.length > 0 ? kept.join(" ") : text;
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -175,20 +233,27 @@ function normalizePunctuationSpacing(text: string): string {
     .trim();
 }
 
-function maybeLowercaseFirstWord(text: string): string {
+/** The model sometimes lowercases on its own; start from consistent capitals. */
+function capitaliseSentenceStarts(text: string): string {
+  return text.replace(/(^|[.!?]\s+)([a-z])/g, (_, lead: string, ch: string) => lead + ch.toUpperCase());
+}
+
+/**
+ * Lowercase every sentence start (not just the first) so casing stays consistent.
+ * Skips "I", all-caps words, and likely multi-word names ("Baskin Robbins").
+ */
+function maybeLowercaseSentenceStarts(text: string): string {
   if (Math.random() >= CASUAL_LOWER_FIRST_CHANCE) return text;
 
-  const match = text.match(/^([A-Za-z]+)/);
-  if (!match) return text;
-
-  const word = match[1];
-  if (word === "I" || word.length <= 1) return text;
-  if (word === word.toUpperCase() && word.length > 1) return text;
-
-  const first = word[0];
-  if (first === first.toLowerCase()) return text;
-
-  return text.replace(/^([A-Za-z])/, (c) => c.toLowerCase());
+  return text.replace(
+    /(^|[.!?]\s+)([A-Z][A-Za-z']*)(\s+[A-Za-z]+)?/g,
+    (full, lead: string, word: string, next: string | undefined) => {
+      if (word === "I" || /^I'/.test(word)) return full;
+      if (word.length > 1 && word === word.toUpperCase()) return full;
+      if (next && /^\s+[A-Z]/.test(next)) return full;
+      return lead + word[0].toLowerCase() + word.slice(1) + (next ?? "");
+    }
+  );
 }
 
 function maybeDropFinalPeriod(text: string): string {
@@ -217,8 +282,17 @@ function maybeSoftenExclaim(text: string): string {
   return text.slice(0, last) + replacement + text.slice(last + 1);
 }
 
-/** `answersText` is the customer's Q&A; visit context they mentioned is kept. */
-export function humanizeReview(text: string, answersText = ""): string {
+/**
+ * `answersText` is the customer's Q&A; visit context they mentioned is kept.
+ * `sentiment` enables understatement swaps for positive drafts.
+ * `answers` (answer values only) decide whether improvement demands are genuine.
+ */
+export function humanizeReview(
+  text: string,
+  answersText = "",
+  sentiment?: string,
+  answers: string[] = []
+): string {
   let s = text.trim();
 
   // Em / en dashes → comma
@@ -232,12 +306,16 @@ export function humanizeReview(text: string, answersText = ""): string {
 
   s = stripMarketingPhrases(s);
   s = stripUnmentionedVisitContext(s, answersText);
-  s = applyIndianEnglishSwaps(s);
+  s = dropInventedSentences(s, answersText, sentiment, answers);
+  s = applySwaps(s, CLICHE_SWAPS);
+  s = applySwaps(s, INDIAN_ENGLISH_SWAPS);
+  if (sentiment === "positive") s = applySwaps(s, POSITIVE_UNDERSTATEMENT_SWAPS);
   s = normalizePunctuationSpacing(s);
 
   s = maybeDropOneComma(s);
   s = maybeSoftenExclaim(s);
-  s = maybeLowercaseFirstWord(s);
+  s = capitaliseSentenceStarts(s);
+  s = maybeLowercaseSentenceStarts(s);
   s = maybeDropFinalPeriod(s);
 
   return normalizePunctuationSpacing(s).trim();

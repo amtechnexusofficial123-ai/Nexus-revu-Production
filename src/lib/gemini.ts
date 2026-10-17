@@ -3,6 +3,7 @@ import { recordGeminiUsage, type GeminiUsageContext } from "@/lib/geminiUsage";
 import type { GeminiUsageMetadata } from "@/lib/geminiPricing";
 import {
   draftTooSimilar,
+  overusedPhrases,
   recentOpenings,
   truncateDraft,
 } from "@/lib/reviewSimilarity";
@@ -29,9 +30,14 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const FALLBACK_MODEL = "gemini-3.5-flash-lite";
 /** Per-model wall clock — keep short so live drafts can fall back before CF 503s. */
 const GEMINI_TIMEOUT_MS = 8000;
-/** Enough for anti-repetition without bloating the prompt. */
-const MAX_RECENT_IN_PROMPT = 5;
+/** Openings and repeated phrases are drawn from this many recent drafts. */
+const MAX_RECENT_IN_PROMPT = 20;
+/** Full (truncated) text is shown only for the newest few, to keep the prompt small. */
+const MAX_FULL_RECENTS_IN_PROMPT = 6;
 const PATTERN_TRUNCATE = 200;
+/** A similarity re-roll is only attempted if at least this much of the live budget remains. */
+const MIN_RETRY_WINDOW_MS = 4000;
+const RETRY_SAFETY_MARGIN_MS = 1000;
 
 function outputTokenLimit(model: string, requested?: number): number {
   if (requested) return requested;
@@ -88,6 +94,7 @@ type GenerateOptions = {
   json?: boolean;
   maxOutputTokens?: number;
   temperature?: number;
+  timeoutMs?: number;
   /** When set, the call's tokens/cost are written to gemini_usage. */
   usage?: GeminiUsageContext;
 };
@@ -125,7 +132,7 @@ async function generateGeminiTextForModel(
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig,
       }),
-    });
+    }, options?.timeoutMs);
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
@@ -273,11 +280,6 @@ const BANNED_OPENERS = [
 
 const BANNED_PHRASES = [
   "hidden gem",
-  "highly recommend",
-  "highly recommended",
-  "must try",
-  "must visit",
-  "must-try",
   "absolutely loved",
   "amazing experience",
   "exceptional service",
@@ -326,7 +328,7 @@ const WRITE_LIKE_RULES = `
 WRITE LIKE A REAL PERSON TYPING A GOOGLE REVIEW:
 - Follow the HARD RULE — INDIAN ENGLISH block above
 - Imperfections are good: slightly messy wording, a fragment, trailing off, uneven punctuation
-- Occasional lowercase start or missing final period is fine — do not polish every sentence
+- Use normal capitalisation (capital letter at the start of every sentence); a missing final period is fine
 - Never use a neat 3-beat structure (setup + praise + closer)
 - No corporate politeness or polished customer-service tone
 - No em dashes or en dashes; no hyphenated compounds (write "well behaved" not "well-behaved")
@@ -340,6 +342,8 @@ HARD RULE — ANSWER GROUNDING:
 - Build the review from concrete details in the customer answers (one-sentence drafts may use one; longer drafts should cover two or three)
 - Prefer what they actually said (a product, wait, staff moment, price note) over abstract praise
 - Do NOT invent specifics that are not in the answers
+- Do NOT bring up topics the answers never mention (washroom, cleanliness, parking, price, wait time, staff). To reach the length, go deeper on what they did say (what stood out, how it tasted or felt), not wider
+- If every answer is positive, the review must contain zero complaints, criticism or suggestions for improvement
 - No generic praise loops that could fit any business ("great service, great food, great vibe")`;
 
 const NO_VISIT_CONTEXT_RULES = `
@@ -407,10 +411,19 @@ function formatVariationBlock(variation: VariationBundle, noAnswers: boolean): s
     "",
     formatVoiceHardRules(variation.voice),
   ].filter(Boolean);
-  if (!noAnswers) {
+  if (noAnswers) {
+    lines.push(`- Opening: ${variation.openingStyle}`);
+  } else {
     lines.push(
-      `- Lead with this answer as your opening focus: Q: ${variation.leadQa.question} / A: ${variation.leadQa.answer}`
+      `- Opening: ${variation.openingStyle}, about this answer: Q: ${variation.leadQa.question} / A: ${variation.leadQa.answer}`
     );
+    if (variation.featuredQas && variation.featuredQas.length > 0) {
+      lines.push(
+        `- Centre this draft on these answers: ${variation.featuredQas
+          .map((qa) => `${qa.question} → ${qa.answer}`)
+          .join("; ")}. Mention the others briefly or skip them, but never drop a complaint or low rating`
+      );
+    }
   }
   if (variation.contentFocusSeed) {
     lines.push(`- Content angle: ${variation.contentFocusSeed}`);
@@ -442,11 +455,19 @@ Do not mention meals, time of day, or who you were with unless the answers say s
 function formatRepetitionGuards(recentDrafts: string[]): string {
   const limited = limitRecents(recentDrafts);
   const openings = recentOpenings(limited);
-  const truncatedRecents = limited.map((d) => truncateDraft(d, PATTERN_TRUNCATE));
+  const phrases = overusedPhrases(limited);
+  const truncatedRecents = limited
+    .slice(0, MAX_FULL_RECENTS_IN_PROMPT)
+    .map((d) => truncateDraft(d, PATTERN_TRUNCATE));
 
   const openingBan =
     openings.length > 0
-      ? `\nHARD RULE — do NOT reuse or closely mimic these recent opening lines:\n${openings.map((o) => `- "${o}"`).join("\n")}`
+      ? `\nHARD RULE — do NOT reuse or closely mimic these recent opening lines (start differently from all of them):\n${openings.map((o) => `- "${o}"`).join("\n")}`
+      : "";
+
+  const phraseBan =
+    phrases.length > 0
+      ? `\nHARD RULE — these phrases are overused in recent reviews here, do NOT use them:\n${phrases.map((p) => `- "${p}"`).join("\n")}`
       : "";
 
   const patternBan =
@@ -454,7 +475,7 @@ function formatRepetitionGuards(recentDrafts: string[]): string {
       ? `\nRecent reviews at this business (do not reuse sentence patterns or distinctive phrases from these):\n${truncatedRecents.map((d, i) => `${i + 1}. "${d}"`).join("\n")}`
       : "";
 
-  return `${openingBan}${patternBan}`;
+  return `${openingBan}${phraseBan}${patternBan}`;
 }
 
 function buildLiteNoAnswersPrompt(
@@ -490,9 +511,9 @@ Business: ${business.name}
 ${business.category ? `Type: ${business.category}` : ""}
 
 Answers:
-${qas.map((qa, i) => `${i + 1}. ${qa.question} → ${qa.answer}`).join("\n")}
+${(variation.answerOrder ?? qas).map((qa, i) => `${i + 1}. ${qa.question} → ${qa.answer}`).join("\n")}
 
-${lengthHintForLite(variation)} Lead with: "${variation.leadQa.answer}". Use concrete details from the answers only — no invented specifics, no generic praise loops. Match tone to star ratings. No marketing clichés.
+${lengthHintForLite(variation)} ${variation.openingStyle}, about: "${variation.leadQa.answer}". Use concrete details from the answers only — no invented specifics, no topics the answers never mention (washroom, cleanliness, parking, price, wait), no generic praise loops. If every answer is positive, no complaints or improvement suggestions at all. Match tone to star ratings. No marketing clichés.
 VOICE (must be obvious): ${v.label}
 Do: ${v.dos[0]}
 Don't: ${v.donts[0]}
@@ -551,7 +572,7 @@ ${formatIndianEnglishRules(variation.indianTouches, variation.lengthMode)}
 ${formatBusinessContext(business)}
 
 CUSTOMER ANSWERS:
-${qas.map((qa, i) => `${i + 1}. Q: ${qa.question}\n   A: ${qa.answer}`).join("\n")}
+${(variation.answerOrder ?? qas).map((qa, i) => `${i + 1}. Q: ${qa.question}\n   A: ${qa.answer}`).join("\n")}
 
 VARIATION FOR THIS DRAFT (follow these — customer did not choose them):
 ${formatVariationBlock(variation, false)}
@@ -587,10 +608,16 @@ Respond ONLY with JSON in this exact shape, no markdown fences, no preamble:
 function parseDraftJson(text: string, qas: QA[] = []): GeminiDraftResult {
   const cleaned = text.replace(/^```json\s*|```$/g, "").trim();
   const answersText = qas.map((qa) => `${qa.question} ${qa.answer}`).join(" ");
+  const answers = qas.map((qa) => qa.answer);
   try {
     const parsed = JSON.parse(cleaned);
     const sentiment = parsed.sentiment as GeminiDraftResult["sentiment"];
-    const draftText = humanizeReview(String(parsed.draftText ?? ""), answersText);
+    const draftText = humanizeReview(
+      String(parsed.draftText ?? ""),
+      answersText,
+      sentiment,
+      answers
+    );
     if (!["positive", "neutral", "negative"].includes(sentiment)) {
       return { draftText, sentiment: "neutral" };
     }
@@ -605,7 +632,8 @@ async function generateOnce(
   qas: QA[],
   variation: VariationBundle,
   recentDrafts: string[],
-  usage: GeminiUsageContext
+  usage: GeminiUsageContext,
+  timeoutMs?: number
 ): Promise<GeminiDraftResult> {
   const hasAnswers = qas.some((qa) => qa.answer.trim());
   const fullPrompt = hasAnswers
@@ -630,6 +658,7 @@ async function generateOnce(
       const text = await generateGeminiTextForModel(prompt, model, {
         json: true,
         temperature: 1,
+        timeoutMs,
         usage,
       });
       return parseDraftJson(text, qas);
@@ -655,10 +684,13 @@ export async function draftReviewWithGemini(
   recentDrafts: string[] = [],
   options?: {
     antiRepeatRetry?: boolean;
+    /** Total wall clock the caller allows; the similarity re-roll only runs if it fits inside. */
+    liveBudgetMs?: number;
     businessId?: string | null;
     sessionId?: string | null;
   }
 ): Promise<GeminiDraftResult> {
+  const startedAt = Date.now();
   const hasAnswers = qas.some((qa) => qa.answer.trim());
   const themes = (business.reviewThemes ?? []).filter((t) => t.trim());
   const usage: GeminiUsageContext = {
@@ -672,22 +704,42 @@ export async function draftReviewWithGemini(
     ? pickVariation(qas)
     : pickNoAnswerVariation(themes);
 
-  let result = await generateOnce(business, qas, variation, recentDrafts, usage);
+  const result = await generateOnce(business, qas, variation, recentDrafts, usage);
 
-  // Live customer drafts skip the similarity re-roll — a second Gemini pass
-  // often pushes Cloudflare Workers past the request time limit (HTTP 503).
   if (
-    options?.antiRepeatRetry !== false &&
-    recentDrafts.length > 0 &&
-    draftTooSimilar(result.draftText, recentDrafts)
+    options?.antiRepeatRetry === false ||
+    recentDrafts.length === 0 ||
+    !draftTooSimilar(result.draftText, recentDrafts)
   ) {
-    const retryVariation = hasAnswers
-      ? pickVariationRetry(qas, variation)
-      : pickNoAnswerVariationRetry(themes, variation);
-    result = await generateOnce(business, qas, retryVariation, recentDrafts, usage);
+    return result;
   }
 
-  return result;
+  // A second pass that overruns the live budget gets the request killed (HTTP 503),
+  // so the re-roll only runs when enough time is left and is capped to that time.
+  let retryTimeoutMs: number | undefined;
+  if (options?.liveBudgetMs) {
+    const remaining =
+      options.liveBudgetMs - (Date.now() - startedAt) - RETRY_SAFETY_MARGIN_MS;
+    if (remaining < MIN_RETRY_WINDOW_MS) return result;
+    retryTimeoutMs = Math.min(GEMINI_TIMEOUT_MS, remaining);
+  }
+
+  const retryVariation = hasAnswers
+    ? pickVariationRetry(qas, variation)
+    : pickNoAnswerVariationRetry(themes, variation);
+  try {
+    return await generateOnce(
+      business,
+      qas,
+      retryVariation,
+      recentDrafts,
+      usage,
+      retryTimeoutMs
+    );
+  } catch (err) {
+    console.warn("Similarity re-roll failed, keeping first draft:", err);
+    return result;
+  }
 }
 
 /**
@@ -708,7 +760,7 @@ export async function draftBacklogReviewWithGemini(
   const variation = pickNoAnswerVariation(themes);
   const tone =
     sentiment === "positive"
-      ? "Write a positive review. Friendly, understated, everyday speech. No I'll-be-back closer."
+      ? "Write a positive review. Friendly, simple everyday speech. No I'll-be-back closer."
       : sentiment === "negative"
         ? "Write a constructive negative review. Calm and specific (e.g. wait was long), not insulting. Do not praise the visit."
         : "Write a mixed/neutral review. Okay but not great — something average about service, wait, or value.";

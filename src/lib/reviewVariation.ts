@@ -28,14 +28,24 @@ export const STRUCTURE_SEEDS = [
   "Start mid-thought, no stock opener, then add two or three more details",
   "Jump straight into what stood out, then cover a second and third detail",
   "Sound like telling a friend about the visit, a few relaxed sentences",
-  "Lead with the answer, then explain why in a couple of sentences",
+  "State the main point first, then explain why in a couple of sentences",
   "Short fragment first, then a few plain sentences with specifics",
   "Go through what you tried, how it was, and one small extra observation",
 ] as const;
 
+/** How the first sentence starts. No example openers — models copy those verbatim. */
+export const OPENING_STYLES = [
+  "Open with your verdict in a few words",
+  "Open with the specific item or thing you are talking about",
+  "Open with a small moment or detail you noticed",
+  "Open with a quick reaction, then the detail behind it",
+  "Open with a short fragment, not a full sentence",
+  "Open by comparing it to what you expected",
+] as const;
+
 /** Sharply different voices so drafts don't all blend into the same casual tone. */
 export type VoiceProfile = {
-  id: "blunt" | "warm" | "dry" | "chatty" | "choppy";
+  id: "blunt" | "warm" | "practical" | "chatty" | "choppy";
   label: string;
   dos: readonly [string, string, string];
   donts: readonly [string, string, string];
@@ -71,17 +81,17 @@ export const VOICE_PROFILES: readonly VoiceProfile[] = [
     ],
   },
   {
-    id: "dry",
-    label: "Dry / understated",
+    id: "practical",
+    label: "Practical / no-nonsense",
     dos: [
-      "Underplay the praise — keep it low-key",
-      "A slight dry edge is ok",
-      "Prefer 'ok', 'decent', 'fine' over strong adjectives",
+      "Focus on practical points like taste, price, quantity, speed or cleanliness",
+      "Simple everyday words ('good', 'nice', 'quick', 'reasonable')",
+      "Give a clear verdict on each point",
     ],
     donts: [
-      "No gushing or excitement",
-      "No warm fuzzy wording",
-      "No enthusiastic ! or hype",
+      "No British understatement ('quite fine', 'decent enough', 'not bad at all')",
+      "No gushing or stacked exclamation marks",
+      "No sarcasm or dry wit",
     ],
   },
   {
@@ -123,16 +133,15 @@ export const INDIAN_ENGLISH_TOUCHES = [
   'Treat staff as singular ("staff was polite", "staff was very cooperative")',
   'If price comes up, say "value for money", "reasonable rates", "bit costly" or "on the higher side"',
   'Say "ambience" instead of "atmosphere" or "vibe"',
-  'If cleanliness comes up, say "neat and clean" or mention hygiene',
-  'Use emphatic "only" or "itself" once, the way people talk ("got it fresh only", "service itself was slow")',
+  'Only if the answers mention cleanliness, say "neat and clean"',
   'Place "also" Indian style ("prices are also reasonable", "staff was also helpful")',
-  'Address the business once directly, like "keep it up" if positive or "please improve the waiting time" if not',
+  'Address the business once directly: "keep it up" if the answers are positive, or ask them to fix the exact complaint the answers raise',
   'Use "superb" or "too good" for praise, or "not up to the mark" for criticism',
   'Drop the "a" before "bit" once ("bit crowded", "bit costly")',
   'Describe service as "prompt", "quick" or "slow" ("service was prompt")',
   'Use "had" for eating or trying something ("had their cold coffee"), only for items in the answers',
-  'Suggest lightly with "do try" or "can go for it" if positive, or "management should look into this" if not',
-  'Sum up one thing with "overall" ("overall good", "overall bit disappointing")',
+  'If the answers are positive, recommend lightly with "do try" or "can go for it"',
+  'Use one common Indian review phrase: "value for money", "very nice", or if positive "must try" or "highly recommended"',
 ] as const;
 
 export const CONTENT_FOCUS_SEEDS = [
@@ -151,6 +160,11 @@ export type VariationBundle = {
   /** Label only — prefer `voice` for rules. */
   voiceSeed: string;
   leadQa: QA;
+  openingStyle: string;
+  /** All answers in a shuffled order, so the model doesn't always walk them top to bottom. */
+  answerOrder?: QA[];
+  /** Subset to centre this draft on; empty when every answer is featured. */
+  featuredQas?: QA[];
   contentFocusSeed?: string;
   highlightTheme?: string;
   singleSentence: boolean;
@@ -162,12 +176,9 @@ const SINGLE_STRUCTURE = "One casual sentence only — stop there, no wrap-up";
 const TWO_LINER_STRUCTURE =
   "Two short lines that feel a bit disjointed, like a phone note";
 
-/** ~35% single, ~35% two-liner, ~30% medium. */
+/** ~20% two-liner, ~80% medium. Single-sentence drafts are no longer picked. */
 function pickLengthMode(): LengthMode {
-  const r = Math.random();
-  if (r < 0.35) return "single";
-  if (r < 0.7) return "two_liner";
-  return "medium";
+  return Math.random() < 0.2 ? "two_liner" : "medium";
 }
 
 function pickTargetWords(mode: LengthMode): number {
@@ -190,8 +201,17 @@ function pickVoice(): VoiceProfile {
   return pickRandom(VOICE_PROFILES);
 }
 
+function shuffle<T>(items: readonly T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 function pickIndianTouches(count = 3): string[] {
-  return [...INDIAN_ENGLISH_TOUCHES].sort(() => Math.random() - 0.5).slice(0, count);
+  return shuffle(INDIAN_ENGLISH_TOUCHES).slice(0, count);
 }
 
 /** Hard Indian English block — placed at the top of prompts so lite models weight it. */
@@ -200,11 +220,13 @@ export function formatIndianEnglishRules(touches: string[], lengthMode: LengthMo
   return `HARD RULE — INDIAN ENGLISH (most important style rule):
 - Write the way an Indian customer actually types a Google review, NOT American or British review English
 - British/Indian spelling (flavour, colour, favourite, centre, organised)
-- Indian everyday words: washroom (not restroom), takeaway (not takeout), bill (not check), mobile (not cell phone)
+- Indian everyday words when the answers already touch that topic: takeaway (not takeout), bill (not check)
 - No American slang or hype ("awesome", "super cute", "stoked", "y'all", "gotten")
+- No British understatement ("quite fine", "decent enough", "rather good", "not bad at all") — say plainly whether it was good or not
+- Common Indian review phrases ("value for money", "very nice", "must try", "highly recommended") are fine, at most one per review
 - Plain simple sentences; contractions optional
 - Natural, not a parody: no Hindi words, no fake accent, no deliberate typos or broken grammar
-Use ${minTouches} of these Indian English touches for THIS draft, worked in naturally:
+Use ${minTouches} of these Indian English touches for THIS draft, worked in naturally (skip any touch whose topic is not in the answers):
 ${touches.map((t) => `- ${t}`).join("\n")}`;
 }
 
@@ -221,7 +243,9 @@ If this draft could pass for a different voice, rewrite until THIS voice is clea
 
 function buildBundle(
   leadQa: QA,
-  extras?: Partial<Pick<VariationBundle, "contentFocusSeed" | "highlightTheme">> & {
+  extras?: Partial<
+    Pick<VariationBundle, "contentFocusSeed" | "highlightTheme" | "answerOrder" | "featuredQas">
+  > & {
     lengthMode?: LengthMode;
   }
 ): VariationBundle {
@@ -233,6 +257,9 @@ function buildBundle(
     voice,
     voiceSeed: voice.label,
     leadQa,
+    openingStyle: pickRandom(OPENING_STYLES),
+    answerOrder: extras?.answerOrder,
+    featuredQas: extras?.featuredQas,
     singleSentence: lengthMode === "single",
     lengthMode,
     contentFocusSeed:
@@ -268,12 +295,23 @@ export function formatLengthHardRule(
 }
 
 export function pickVariation(qas: QA[]): VariationBundle {
-  const nonEmpty = qas.filter((qa) => qa.answer.trim());
-  const leadQa =
-    nonEmpty.length > 0
-      ? pickRandom(nonEmpty)
-      : { question: "overall experience", answer: "positive visit" };
-  return buildBundle(leadQa);
+  const answerOrder = shuffle(qas.filter((qa) => qa.answer.trim()));
+  if (answerOrder.length === 0) {
+    return buildBundle({ question: "overall experience", answer: "positive visit" });
+  }
+  const lengthMode = pickLengthMode();
+  const featureCount = lengthMode === "medium" ? 2 + Math.floor(Math.random() * 2) : 2;
+  // Bare ratings ("5/5") give the model nothing concrete to open with, so they go last.
+  const byContent = [
+    ...answerOrder.filter((qa) => !isBareRating(qa.answer)),
+    ...answerOrder.filter((qa) => isBareRating(qa.answer)),
+  ];
+  const featured = byContent.slice(0, featureCount);
+  return buildBundle(featured[0], {
+    lengthMode,
+    answerOrder,
+    featuredQas: featured.length < answerOrder.length ? featured : [],
+  });
 }
 
 export function pickVariationRetry(qas: QA[], previous: VariationBundle): VariationBundle {
@@ -285,12 +323,17 @@ export function pickVariationRetry(qas: QA[], previous: VariationBundle): Variat
     next.lengthMode === previous.lengthMode &&
     next.structureSeed === previous.structureSeed &&
     next.voice.id === previous.voice.id &&
+    next.openingStyle === previous.openingStyle &&
     qaKey(next.leadQa) === prevKey
   ) {
     next = pickVariation(qas);
     attempts++;
   }
   return next;
+}
+
+function isBareRating(answer: string): boolean {
+  return /^\s*\d+(?:\.\d+)?\s*(?:\/\s*\d+|stars?)?\s*$/i.test(answer);
 }
 
 function qaKey(qa: QA): string {

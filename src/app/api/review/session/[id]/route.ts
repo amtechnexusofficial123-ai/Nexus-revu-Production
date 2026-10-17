@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { reviewSessions } from "@/db/schema";
-import { checkPostVelocity } from "@/lib/reviewVelocity";
 import { eq } from "drizzle-orm";
 
 type Body = {
@@ -23,7 +22,6 @@ export async function POST(
     const [existing] = await db
       .select({
         id: reviewSessions.id,
-        businessId: reviewSessions.businessId,
         postedAt: reviewSessions.postedAt,
         whatsappClickedAt: reviewSessions.whatsappClickedAt,
       })
@@ -37,16 +35,6 @@ export async function POST(
     const now = new Date();
     if (action === "post") {
       if (!existing.postedAt) {
-        const velocity = await checkPostVelocity(existing.businessId);
-        if (velocity.exceeded) {
-          // Still ok:true so clipboard + Google open aren't blocked client-side;
-          // we just skip recording another post in a burst window.
-          return NextResponse.json({
-            ok: true,
-            velocityLimited: true,
-            message: velocity.message,
-          });
-        }
         await db
           .update(reviewSessions)
           .set({ postedAt: now })

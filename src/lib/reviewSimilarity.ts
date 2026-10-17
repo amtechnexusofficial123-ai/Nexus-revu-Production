@@ -64,6 +64,50 @@ export function recentOpenings(recentDrafts: string[]): string[] {
   return recentDrafts.map((d) => firstSentence(d)).filter(Boolean);
 }
 
+const PHRASE_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "is", "was", "are", "were", "it", "its", "it's",
+  "i", "we", "my", "our", "of", "to", "in", "on", "at", "for", "with", "this", "that",
+  "they", "their", "here", "there", "so", "very", "quite", "also", "be", "been",
+]);
+
+/** Three-word phrases repeated across at least two recent drafts, most common first. */
+export function overusedPhrases(recentDrafts: string[], max = 12): string[] {
+  const counts = new Map<string, number>();
+  for (const draft of recentDrafts) {
+    const words = normalizeForCompare(draft).split(" ").filter(Boolean);
+    const seen = new Set<string>();
+    for (let i = 0; i + 3 <= words.length; i++) {
+      const gram = words.slice(i, i + 3);
+      if (gram.every((w) => PHRASE_STOPWORDS.has(w))) continue;
+      seen.add(gram.join(" "));
+    }
+    for (const phrase of seen) counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+  }
+  const ranked = [...counts.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .map(([phrase]) => phrase.split(" "));
+
+  // Chain overlapping trigrams ("the ambience of" + "ambience of this") into one phrase.
+  const merged: string[][] = [];
+  for (const gram of ranked) {
+    const head = gram.slice(0, 2).join(" ");
+    const tail = gram.slice(1).join(" ");
+    const extendable = merged.find((p) => p.slice(-2).join(" ") === head);
+    if (extendable) {
+      extendable.push(gram[2]);
+      continue;
+    }
+    const prependable = merged.find((p) => p.slice(0, 2).join(" ") === tail);
+    if (prependable) {
+      prependable.unshift(gram[0]);
+      continue;
+    }
+    merged.push([...gram]);
+  }
+  return merged.slice(0, max).map((p) => p.join(" "));
+}
+
 export function truncateDraft(text: string, max = 280): string {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
