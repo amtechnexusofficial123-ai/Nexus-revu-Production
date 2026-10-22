@@ -45,6 +45,12 @@ export default function CustomerReviewPage({
   const [loadKey, setLoadKey] = useState(0);
 
   useEffect(() => {
+    return () => {
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadQuestions(attempt = 1): Promise<void> {
@@ -290,12 +296,37 @@ export default function CustomerReviewPage({
     }
   }
 
+  function speakPasteInstructions(didCopy: boolean) {
+    if (!("speechSynthesis" in window)) return;
+
+    const utterance = new SpeechSynthesisUtterance(
+      [
+        didCopy ? "Your review is copied." : "Your review is ready.",
+        "When the Google review page opens, tap the review box and select Paste.",
+        "Then choose your star rating.",
+        "Finally, tap Post to submit.",
+      ].join(" ")
+    );
+    utterance.lang = "en-IN";
+    utterance.rate = 0.95;
+
+    const voice = window.speechSynthesis
+      .getVoices()
+      .find((v) => v.lang.toLowerCase().startsWith("en-in"));
+    if (voice) utterance.voice = voice;
+
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }
+
   function showGooglePasteNotice(didCopy: boolean) {
     setPasteNoticeCopied(didCopy);
     setShowPasteNotice(true);
+    speakPasteInstructions(didCopy);
   }
 
   function handleProceedToGoogle() {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     trackAction("post");
     if (!googleUrl) return;
     const opened = window.open(googleUrl, "_blank");
