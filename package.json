@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "db:patch": "node scripts/db-patch.mjs",
@@ -16,26 +16,28 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
+    "bcryptjs": "^2.4.3",
     "drizzle-orm": "^0.36.4",
     "jose": "^5.9.6",
-    "bcryptjs": "^2.4.3",
+    "nanoid": "^5.0.9",
+    "next": "^16.4.2",
     "qrcode": "^1.5.4",
-    "next": "^15.5.24",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "nanoid": "^5.0.9"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@opennextjs/cloudflare": "^1.20.3",
-    "@types/node": "^22.9.0",
-    "@types/react": "^19.0.0",
-    "@types/qrcode": "^1.5.5",
+    "@opennextjs/cloudflare": "^1.20.13",
     "@types/bcryptjs": "^2.4.6",
-    "typescript": "^5.6.3",
-    "tailwindcss": "^3.4.14",
-    "postcss": "^8.4.49",
+    "@types/node": "^22.9.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.0",
     "autoprefixer": "^10.4.20",
     "drizzle-kit": "^0.28.1",
-    "wrangler": "^4.125.0"
+    "eslint": "^10.13.0",
+    "eslint-config-next": "^16.4.2",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.151.3"
   }
 }
