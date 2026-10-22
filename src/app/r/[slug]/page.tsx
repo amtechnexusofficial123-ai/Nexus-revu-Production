@@ -6,6 +6,8 @@ import type { QuestionType } from "@/lib/questionTypes";
 type Question = { id: string; text: string; type: QuestionType; options: string[] | null };
 type BusinessInfo = { name: string; logoUrl: string | null; slug: string };
 
+const GOOGLE_NOTICE_DELAY_MS = 4000;
+
 function reportClientError(
   slug: string,
   source: string,
@@ -39,6 +41,8 @@ export default function CustomerReviewPage({
   const [whatsappUrl, setWhatsappUrl] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showPasteNotice, setShowPasteNotice] = useState(false);
+  const [pasteNoticeCopied, setPasteNoticeCopied] = useState(false);
 
   const [loadKey, setLoadKey] = useState(0);
 
@@ -279,25 +283,35 @@ export default function CustomerReviewPage({
     });
   }
 
-  async function handlePost() {
+  async function copyDraft() {
     try {
       await navigator.clipboard.writeText(draft);
-      setCopied(true);
+      return true;
     } catch {
-      // clipboard can fail on non-https/local — the text is still shown for manual copy
+      return false;
     }
+  }
+
+  function openGoogleAfterNotice(didCopy: boolean) {
+    setPasteNoticeCopied(didCopy);
+    setShowPasteNotice(true);
+    window.setTimeout(() => {
+      if (googleUrl) window.location.assign(googleUrl);
+    }, GOOGLE_NOTICE_DELAY_MS);
+  }
+
+  async function handlePost() {
+    const didCopy = await copyDraft();
+    if (didCopy) setCopied(true);
     trackAction("post");
-    if (googleUrl) window.open(googleUrl, "_blank");
+    openGoogleAfterNotice(didCopy);
   }
 
   async function handleGoogleReview() {
-    try {
-      await navigator.clipboard.writeText(draft);
-    } catch {
-      // clipboard can fail — customer can still copy from the draft box
-    }
+    const didCopy = await copyDraft();
+    if (didCopy) setCopied(true);
     trackAction("post");
-    if (googleUrl) window.open(googleUrl, "_blank");
+    openGoogleAfterNotice(didCopy);
   }
 
   function handleWhatsAppClick() {
@@ -422,7 +436,9 @@ export default function CustomerReviewPage({
               </p>
             </div>
           ) : (
-            <p className="text-sm font-medium text-ink/80">Here&apos;s your review:</p>
+            <p className="text-sm font-medium text-ink/80">
+              Almost done — Google needs one more step.
+            </p>
           )}
           <p className="whitespace-pre-line rounded-card bg-brand-light p-4 text-sm text-ink">{draft}</p>
           {googleUrl ? (
@@ -438,7 +454,7 @@ export default function CustomerReviewPage({
                 Open Google again
               </button>
             ) : (
-              <button onClick={handlePost} className="btn-primary">Post</button>
+              <button onClick={handlePost} className="btn-primary">Copy review &amp; open Google</button>
             )
           ) : (
             <p className="text-center text-xs text-ink/50">
@@ -448,6 +464,27 @@ export default function CustomerReviewPage({
           )}
         </div>
       ) : null}
+
+      {showPasteNotice && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="paste-notice-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/45 px-4 backdrop-blur-sm"
+        >
+          <div className="card w-full max-w-sm text-center shadow-xl">
+            <p id="paste-notice-title" className="font-display text-xl text-ink">
+              {pasteNoticeCopied ? "Your review is copied!" : "Your review is ready."}
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-ink/75">
+              When Google review page opens, tap the box and select Paste, then choose the stars and click post
+            </p>
+            <p className="mt-4 text-xs font-medium uppercase tracking-wide text-ink/45">
+              Opening Google in a few seconds…
+            </p>
+          </div>
+        </div>
+      )}
 
       <p className="mt-8 text-center text-[11px] text-ink/40">
         Powered by{" "}
