@@ -27,7 +27,7 @@ export type GeminiDraftResult = {
 };
 
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const FALLBACK_MODEL = "gemini-3.5-flash-lite";
+const FALLBACK_MODEL = "gemini-3.6-flash";
 /** Per-model wall clock — keep short so live drafts can fall back before CF 503s. */
 const GEMINI_TIMEOUT_MS = 8000;
 /** Openings and repeated phrases are drawn from this many recent drafts. */
@@ -659,7 +659,8 @@ async function generateOnce(
     { model: primaryModel, prompt: fullPrompt },
   ];
   if (primaryModel !== FALLBACK_MODEL) {
-    attempts.push({ model: FALLBACK_MODEL, prompt: litePrompt });
+    const fallbackPrompt = isGemini36Model(FALLBACK_MODEL) ? fullPrompt : litePrompt;
+    attempts.push({ model: FALLBACK_MODEL, prompt: fallbackPrompt });
   }
 
   let lastError: unknown;
@@ -822,7 +823,8 @@ Respond ONLY with JSON: {"draftText":"...","sentiment":"${sentiment}"}`;
     { model: primaryModel, prompt: fullPrompt },
   ];
   if (primaryModel !== FALLBACK_MODEL) {
-    attempts.push({ model: FALLBACK_MODEL, prompt: litePrompt });
+    const fallbackPrompt = isGemini36Model(FALLBACK_MODEL) ? fullPrompt : litePrompt;
+    attempts.push({ model: FALLBACK_MODEL, prompt: fallbackPrompt });
   }
 
   let lastError: unknown;

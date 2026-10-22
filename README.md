@@ -33,11 +33,11 @@ internally so you can spot an unhappy customer and follow up privately.
 
 ## Stack
 
-- Next.js 15 (App Router), deployed to Cloudflare Workers via `@opennextjs/cloudflare`
+- Next.js 16 (App Router), deployed to Cloudflare Workers via `@opennextjs/cloudflare`
 - Neon Postgres (serverless HTTP driver — works on Cloudflare Workers)
 - Drizzle ORM
 - Template-based review drafting from customer answers (falls back when no AI key)
-- Google Gemini (`GEMINI_API_KEY`, default `gemini-3.5-flash-lite`) for varied AI-drafted reviews when configured
+- Google Gemini (`GEMINI_API_KEY`, primary `gemini-3.5-flash-lite`, fallback `gemini-3.6-flash`) for varied AI-drafted reviews when configured
 - `qrcode` npm package for QR generation
 - Cookie + JWT (jose) sessions, bcrypt password hashing
 
