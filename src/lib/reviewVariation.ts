@@ -1,6 +1,6 @@
 export type QA = { question: string; answer: string };
 
-export type LengthMode = "single" | "two_liner" | "medium" | "long";
+export type LengthMode = "single" | "two_liner" | "medium" | "long" | "two_paragraph";
 
 /** Length bands baked into the first Gemini prompt (no re-roll). */
 export type LengthBand = {
@@ -16,6 +16,7 @@ export const LENGTH_BANDS: Record<LengthMode, LengthBand> = {
   two_liner: { minWords: 14, maxWords: 32, minSentences: 2, maxSentences: 2 },
   medium: { minWords: 40, maxWords: 70, minSentences: 3, maxSentences: 5 },
   long: { minWords: 130, maxWords: 160, minSentences: 7, maxSentences: 10 },
+  two_paragraph: { minWords: 170, maxWords: 220, minSentences: 8, maxSentences: 12 },
 };
 
 /** Aim points inside each hard band (never outside). */
@@ -23,6 +24,7 @@ export const TARGET_LENGTHS = [45, 52, 58, 65] as const;
 export const SINGLE_SENTENCE_TARGET_LENGTHS = [10, 12, 14, 16] as const;
 export const TWO_LINER_TARGET_LENGTHS = [18, 22, 26, 30] as const;
 export const LONG_TARGET_LENGTHS = [135, 142, 150, 158] as const;
+export const TWO_PARAGRAPH_TARGET_LENGTHS = [175, 190, 205, 215] as const;
 
 /** Non-formula shapes for medium drafts — never opening + service + closing.
  *  No example openers in the text — models copy those into every draft. */
@@ -40,6 +42,13 @@ export const LONG_STRUCTURE_SEEDS = [
   "Build from one standout detail into a fuller account with small observations",
   "Sound like a thoughtful customer writing a fuller review, not a neat essay",
   "Let the review wander through what they tried, how it felt, and what stood out",
+] as const;
+
+export const TWO_PARAGRAPH_STRUCTURE_SEEDS = [
+  "First paragraph covers the main visit details; second adds smaller observations and the verdict",
+  "First paragraph walks through what stood out; second gives a plain overall take",
+  "Use two uneven paragraphs that feel naturally separated, not intro plus conclusion",
+  "Put the strongest details first, then use the second paragraph for extra context",
 ] as const;
 
 /** How the first sentence starts. No example openers — models copy those verbatim. */
@@ -185,11 +194,12 @@ const SINGLE_STRUCTURE = "One casual sentence only — stop there, no wrap-up";
 const TWO_LINER_STRUCTURE =
   "Two short lines that feel a bit disjointed, like a phone note";
 
-/** ~10% two-liner, ~10% long, ~80% medium. Single-sentence drafts are no longer picked. */
+/** ~10% two-liner, ~10% long, ~10% two-paragraph, ~70% medium. Single-sentence drafts are no longer picked. */
 function pickLengthMode(): LengthMode {
   const roll = Math.random();
   if (roll < 0.1) return "two_liner";
   if (roll < 0.2) return "long";
+  if (roll < 0.3) return "two_paragraph";
   return "medium";
 }
 
@@ -197,6 +207,7 @@ function pickTargetWords(mode: LengthMode): number {
   if (mode === "single") return pickRandom(SINGLE_SENTENCE_TARGET_LENGTHS);
   if (mode === "two_liner") return pickRandom(TWO_LINER_TARGET_LENGTHS);
   if (mode === "long") return pickRandom(LONG_TARGET_LENGTHS);
+  if (mode === "two_paragraph") return pickRandom(TWO_PARAGRAPH_TARGET_LENGTHS);
   return pickRandom(TARGET_LENGTHS);
 }
 
@@ -204,6 +215,7 @@ function pickStructureSeed(mode: LengthMode): string {
   if (mode === "single") return SINGLE_STRUCTURE;
   if (mode === "two_liner") return TWO_LINER_STRUCTURE;
   if (mode === "long") return pickRandom(LONG_STRUCTURE_SEEDS);
+  if (mode === "two_paragraph") return pickRandom(TWO_PARAGRAPH_STRUCTURE_SEEDS);
   return pickRandom(STRUCTURE_SEEDS);
 }
 
@@ -231,7 +243,9 @@ function pickIndianTouches(count = 3): string[] {
 /** Hard Indian English block — placed at the top of prompts so lite models weight it. */
 export function formatIndianEnglishRules(touches: string[], lengthMode: LengthMode): string {
   const minTouches =
-    lengthMode === "medium" || lengthMode === "long" ? "at least TWO" : "at least ONE";
+    lengthMode === "medium" || lengthMode === "long" || lengthMode === "two_paragraph"
+      ? "at least TWO"
+      : "at least ONE";
   return `HARD RULE — INDIAN ENGLISH (most important style rule):
 - Write the way an Indian customer actually types a Google review, NOT American or British review English
 - British/Indian spelling (flavour, colour, favourite, centre, organised)
@@ -278,7 +292,7 @@ function buildBundle(
     singleSentence: lengthMode === "single",
     lengthMode,
     contentFocusSeed:
-      lengthMode === "medium" || lengthMode === "long"
+      lengthMode === "medium" || lengthMode === "long" || lengthMode === "two_paragraph"
         ? extras?.contentFocusSeed
         : undefined,
     highlightTheme: extras?.highlightTheme,
@@ -311,6 +325,14 @@ export function formatLengthHardRule(
 - Cover several concrete details from the answers/context; do not pad with generic praise
 - Natural, uneven flow — not an essay, a list, or a polished intro-body-conclusion shape`;
   }
+  if (mode === "two_paragraph") {
+    return `HARD RULE — LENGTH (must follow on the first try):
+- Write exactly TWO paragraphs, separated by one blank line
+- Write ${band.minSentences} to ${band.maxSentences} sentences total
+- Total word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
+- Cover several concrete details from the answers/context; do not pad with generic praise
+- Natural, uneven flow — not an essay, a list, or a polished intro-body-conclusion shape`;
+  }
   return `HARD RULE — LENGTH (must follow on the first try):
 - Write ${band.minSentences} to ${band.maxSentences} sentences — fewer than ${band.minSentences} is a failure
 - Total word count MUST be between ${band.minWords} and ${band.maxWords} (aim ~${targetWords})
@@ -325,7 +347,7 @@ export function pickVariation(qas: QA[]): VariationBundle {
   }
   const lengthMode = pickLengthMode();
   const featureCount =
-    lengthMode === "long"
+    lengthMode === "long" || lengthMode === "two_paragraph"
       ? 3
       : lengthMode === "medium"
         ? 2 + Math.floor(Math.random() * 2)

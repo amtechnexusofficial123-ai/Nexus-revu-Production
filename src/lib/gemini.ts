@@ -407,7 +407,9 @@ Background (accuracy only, do NOT recite the full list): ${description}`;
 function formatVariationBlock(variation: VariationBundle, noAnswers: boolean): string {
   const lines = [
     formatLengthHardRule(variation.lengthMode, variation.targetWords),
-    variation.lengthMode === "medium" || variation.lengthMode === "long"
+    variation.lengthMode === "medium" ||
+    variation.lengthMode === "long" ||
+    variation.lengthMode === "two_paragraph"
       ? `- Shape: ${variation.structureSeed}`
       : "",
     "",
@@ -443,6 +445,9 @@ function lengthHintForLite(variation: VariationBundle): string {
   }
   if (variation.lengthMode === "two_liner") {
     return `HARD: exactly two short lines/sentences, ${band.minWords}-${band.maxWords} words total (aim ~${variation.targetWords}).`;
+  }
+  if (variation.lengthMode === "two_paragraph") {
+    return `HARD: exactly two paragraphs separated by one blank line, ${band.minSentences}-${band.maxSentences} sentences and ${band.minWords}-${band.maxWords} words total (aim ~${variation.targetWords}).`;
   }
   return `HARD: ${band.minSentences} to ${band.maxSentences} sentences, ${band.minWords}-${band.maxWords} words total (aim ~${variation.targetWords}). Each sentence adds a different detail.`;
 }
@@ -598,7 +603,9 @@ ${formatWriteRules([
       ? "Write two short uneven lines — ok if they feel a bit disconnected"
       : variation.lengthMode === "long"
         ? "Write a fuller review with several concrete details — casual and natural, not an essay"
-        : "Write 3 to 5 sentences, each adding a different detail — uneven shape, never opening + service note + closing",
+        : variation.lengthMode === "two_paragraph"
+          ? "Write two naturally separated paragraphs with several concrete details — fuller, but not an essay"
+          : "Write 3 to 5 sentences, each adding a different detail — uneven shape, never opening + service note + closing",
 ])}
 
 ${INDIAN_ENGLISH_REMINDER}

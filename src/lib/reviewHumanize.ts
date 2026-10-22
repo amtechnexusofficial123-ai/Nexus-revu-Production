@@ -192,14 +192,22 @@ function dropInventedSentences(
   sentiment: string | undefined,
   answers: string[]
 ): string {
-  const sentences = text.split(/(?<=[.!?])\s+/);
   const dropDemands = sentiment === "positive" && !answersHaveComplaint(answers);
-  const kept = sentences.filter((sentence) => {
-    if (UNPROMPTED_TOPICS.some((t) => t.test(sentence) && !t.test(answersText))) return false;
-    if (dropDemands && IMPROVEMENT_DEMAND.test(sentence)) return false;
-    return true;
-  });
-  return kept.length > 0 ? kept.join(" ") : text;
+  const keptParagraphs = text
+    .split(/\n\s*\n/)
+    .map((paragraph) => {
+      const kept = paragraph.split(/(?<=[.!?])\s+/).filter((sentence) => {
+        if (UNPROMPTED_TOPICS.some((t) => t.test(sentence) && !t.test(answersText))) {
+          return false;
+        }
+        if (dropDemands && IMPROVEMENT_DEMAND.test(sentence)) return false;
+        return true;
+      });
+      return kept.join(" ").trim();
+    })
+    .filter(Boolean);
+
+  return keptParagraphs.length > 0 ? keptParagraphs.join("\n\n") : text;
 }
 
 function escapeRegExp(text: string): string {
@@ -225,12 +233,17 @@ function stripMarketingPhrases(text: string): string {
 
 function normalizePunctuationSpacing(text: string): string {
   return text
-    .replace(/\s+([,.!?])/g, "$1")
-    .replace(/([,.!?])\s*([,.!?])+/g, "$1")
-    .replace(/,{2,}/g, ",")
-    .replace(/\s{2,}/g, " ")
-    .replace(/\s+$/g, "")
-    .trim();
+    .split(/\n\s*\n/)
+    .map((paragraph) =>
+      paragraph
+        .replace(/\s+([,.!?])/g, "$1")
+        .replace(/([,.!?])\s*([,.!?])+/g, "$1")
+        .replace(/,{2,}/g, ",")
+        .replace(/\s{2,}/g, " ")
+        .trim()
+    )
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** The model sometimes lowercases on its own; start from consistent capitals. */

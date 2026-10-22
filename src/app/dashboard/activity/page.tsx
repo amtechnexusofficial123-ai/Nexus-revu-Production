@@ -193,7 +193,7 @@ export default function ActivityPage() {
                   ) : null}
                 </div>
               </div>
-              <p className="rounded-card bg-brand-light/60 px-3 py-3 text-sm leading-relaxed text-ink">
+              <p className="whitespace-pre-line rounded-card bg-brand-light/60 px-3 py-3 text-sm leading-relaxed text-ink">
                 {session.draftText?.trim() || <span className="text-ink/40">Empty draft</span>}
               </p>
               {session.answers && Object.keys(session.answers).length > 0 && (
