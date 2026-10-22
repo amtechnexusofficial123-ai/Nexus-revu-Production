@@ -17,22 +17,84 @@ function json(data: unknown, status = 200) {
   });
 }
 
+type BusinessRow = {
+  id: string;
+  name: string;
+  slug: string;
+  logoUrl: string | null;
+  enabled: boolean;
+  billingMode: string;
+  razorpaySubscriptionStatus: string | null;
+  paidUntil: Date | null;
+};
+
+type QuestionPoolRow = {
+  id: string;
+  text: string;
+  type: string;
+  options: string[] | null;
+  alwaysAsk: boolean;
+};
+
+const QUESTIONS_CACHE_TTL_MS = 15_000;
+const questionsCache = new Map<
+  string,
+  { expiresAt: number; business: BusinessRow; pool: QuestionPoolRow[] }
+>();
+
+async function loadBusinessQuestionPool(slug: string) {
+  const cached = questionsCache.get(slug);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+
+  const rows = await db
+    .select({
+      business: {
+        id: businesses.id,
+        name: businesses.name,
+        slug: businesses.slug,
+        logoUrl: businesses.logoUrl,
+        enabled: businesses.enabled,
+        billingMode: businesses.billingMode,
+        razorpaySubscriptionStatus: businesses.razorpaySubscriptionStatus,
+        paidUntil: businesses.paidUntil,
+      },
+      question: {
+        id: questions.id,
+        text: questions.text,
+        type: questions.type,
+        options: questions.options,
+        alwaysAsk: questions.alwaysAsk,
+      },
+    })
+    .from(businesses)
+    .leftJoin(
+      questions,
+      and(eq(questions.businessId, businesses.id), eq(questions.active, true))
+    )
+    .where(eq(businesses.slug, slug));
+
+  const business = rows[0]?.business;
+  if (!business) return null;
+
+  const pool = rows
+    .map((row) => row.question)
+    .filter((question): question is QuestionPoolRow => question?.id != null);
+  const entry = { expiresAt: Date.now() + QUESTIONS_CACHE_TTL_MS, business, pool };
+  questionsCache.set(slug, entry);
+  return entry;
+}
+
 export async function GET(req: NextRequest) {
   const slug = req.nextUrl.searchParams.get("slug");
   try {
     if (!slug) return json({ error: "slug required" }, 400);
 
-    const [business] = await db.select().from(businesses).where(eq(businesses.slug, slug));
-    if (!business) return json({ error: "Business not found" }, 404);
+    const result = await loadBusinessQuestionPool(slug);
+    if (!result) return json({ error: "Business not found" }, 404);
+    const { business, pool } = result;
     if (!isCustomerQrActive(business)) {
       return json({ error: "This review link is currently unavailable." }, 403);
     }
-
-    const pool = await db
-      .select()
-      .from(questions)
-      .where(and(eq(questions.businessId, business.id), eq(questions.active, true)));
-
     if (pool.length === 0) {
       return json({ error: "This business hasn't set up any questions yet" }, 404);
     }
