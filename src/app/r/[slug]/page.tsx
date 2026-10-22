@@ -6,8 +6,6 @@ import type { QuestionType } from "@/lib/questionTypes";
 type Question = { id: string; text: string; type: QuestionType; options: string[] | null };
 type BusinessInfo = { name: string; logoUrl: string | null; slug: string };
 
-const GOOGLE_NOTICE_DELAY_MS = 4000;
-
 function reportClientError(
   slug: string,
   source: string,
@@ -292,26 +290,28 @@ export default function CustomerReviewPage({
     }
   }
 
-  function openGoogleAfterNotice(didCopy: boolean) {
+  function showGooglePasteNotice(didCopy: boolean) {
     setPasteNoticeCopied(didCopy);
     setShowPasteNotice(true);
-    window.setTimeout(() => {
-      if (googleUrl) window.location.assign(googleUrl);
-    }, GOOGLE_NOTICE_DELAY_MS);
+  }
+
+  function handleProceedToGoogle() {
+    trackAction("post");
+    if (!googleUrl) return;
+    const opened = window.open(googleUrl, "_blank");
+    if (opened) setShowPasteNotice(false);
   }
 
   async function handlePost() {
     const didCopy = await copyDraft();
     if (didCopy) setCopied(true);
-    trackAction("post");
-    openGoogleAfterNotice(didCopy);
+    showGooglePasteNotice(didCopy);
   }
 
   async function handleGoogleReview() {
     const didCopy = await copyDraft();
     if (didCopy) setCopied(true);
-    trackAction("post");
-    openGoogleAfterNotice(didCopy);
+    showGooglePasteNotice(didCopy);
   }
 
   function handleWhatsAppClick() {
@@ -472,16 +472,28 @@ export default function CustomerReviewPage({
           aria-labelledby="paste-notice-title"
           className="fixed inset-0 z-50 flex items-center justify-center bg-ink/45 px-4 backdrop-blur-sm"
         >
-          <div className="card w-full max-w-sm text-center shadow-xl">
-            <p id="paste-notice-title" className="font-display text-xl text-ink">
+          <div className="card w-full max-w-sm shadow-xl">
+            <p id="paste-notice-title" className="text-center font-display text-xl text-ink">
               {pasteNoticeCopied ? "Your review is copied!" : "Your review is ready."}
             </p>
-            <p className="mt-3 text-sm leading-relaxed text-ink/75">
-              When Google review page opens, tap the box and select Paste, then choose the stars and click post
-            </p>
-            <p className="mt-4 text-xs font-medium uppercase tracking-wide text-ink/45">
-              Opening Google in a few seconds…
-            </p>
+            {!pasteNoticeCopied && (
+              <p className="mt-3 text-center text-sm text-ink/70">
+                Copy the review above before continuing.
+              </p>
+            )}
+            <ol className="mt-4 list-decimal space-y-2 pl-5 text-left text-sm leading-relaxed text-ink/75">
+              <li>Tap the review box on the Google page.</li>
+              <li>Select <span className="font-medium text-ink">Paste</span>.</li>
+              <li>Choose your star rating.</li>
+              <li>Tap <span className="font-medium text-ink">Post</span> to submit.</li>
+            </ol>
+            <button
+              type="button"
+              onClick={handleProceedToGoogle}
+              className="btn-primary mt-6 w-full"
+            >
+              Proceed
+            </button>
           </div>
         </div>
       )}
